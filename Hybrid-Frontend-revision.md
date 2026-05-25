@@ -58,11 +58,18 @@ For reference. Given the previous frame $\mathcal{I}_{k-1}$ with landmark observ
 1. Extract ORB features in $\mathcal{I}_k$: a set of keypoints $\{\mathbf{u}_k^{(j)}\}$ and binary descriptors $\{\mathbf{d}_k^{(j)} \in \{0,1\}^{256}\}$ via FAST corner detection over a Gaussian pyramid with quadtree spatial distribution, followed by BRIEF descriptor computation oriented by intensity centroid.
 
 2. For each landmark $\mathbf{p}_w^{(i)}$ tracked in $\mathcal{I}_{k-1}$, project it into $\mathcal{I}_k$ using a constant-velocity motion model:
-$$\hat{\mathbf{u}}_k^{(i)} = \pi\!\left(\mathbf{K}, \mathbf{T}_{c_kw} \cdot \mathbf{p}_w^{(i)}\right)$$
+
+$$
+\hat{\mathbf{u}}_k^{(i)} = \pi\!\left(\mathbf{K}, \mathbf{T}_{c_kw} \cdot \mathbf{p}_w^{(i)}\right)
+$$
+
 where $\pi(\cdot)$ is the pinhole projection with distortion.
 
 3. Search for the descriptor match within a window $\mathcal{W}(\hat{\mathbf{u}}_k^{(i)}, r)$ of radius $r$ around the prediction, accepting the candidate $j^*$ with minimum Hamming distance:
-$$j^* = \arg\min_{j \in \mathcal{W}} \, d_H\!\left(\mathbf{d}_{k-1}^{(i)},\, \mathbf{d}_k^{(j)}\right)$$
+
+$$
+j^* = \arg\min_{j \in \mathcal{W}} \, d_H\!\left(\mathbf{d}_{k-1}^{(i)},\, \mathbf{d}_k^{(j)}\right)
+$$
 
 4. Run **TrackLocalMap**: project all map points in the local covisibility graph into the current frame and match them to remaining unmatched keypoints, pulling in additional 2D-3D correspondences to tightly constrain the pose.
 
@@ -87,7 +94,11 @@ A single feature is the tuple `(Shi-Tomasi corner location) + (BRIEF descriptor 
 ### 3.1 Why Shi-Tomasi specifically (not FAST) for new track spawning
 
 The Lucas-Kanade update at iteration $t$ is:
-$$\Delta \mathbf{v}_t = \mathbf{H}^{-1} \mathbf{b}_t, \quad \mathbf{H} = \sum_{\mathbf{x} \in \Omega} \nabla \mathcal{I}(\mathbf{x}) \nabla \mathcal{I}(\mathbf{x})^\top$$
+
+$$
+\Delta \mathbf{v}_t = \mathbf{H}^{-1} \mathbf{b}_t, \quad \mathbf{H} = \sum_{\mathbf{x} \in \Omega} \nabla \mathcal{I}(\mathbf{x}) \nabla \mathcal{I}(\mathbf{x})^\top
+$$
+
 where $\mathbf{H} \in \mathbb{R}^{2 \times 2}$ is the structure tensor over the tracking window $\Omega$. Convergence and accuracy depend on the conditioning of $\mathbf{H}$, characterized by its eigenvalues $\lambda_1 \ge \lambda_2 \ge 0$:
 
 - $\lambda_1, \lambda_2 \approx 0$: flat region. $\mathbf{H}$ singular, no solution.
@@ -105,7 +116,8 @@ For descriptor matching this is fine — BRIEF does not depend on $\mathbf{H}$. 
 
 ### 3.2 Why BRIEF on Shi-Tomasi points works
 
-BRIEF is computed from intensity comparisons at sampling locations relative to the keypoint center. It cares about local intensity structure but does not require the underlying point to be a FAST corner. Computing BRIEF at Shi-Tomasi corners produces descriptors of identical format (256-bit binary, same sampling pattern) to those produced by stock ORB-SLAM3 — bit-compatible. The DBoW2 vocabulary, loop closure matching, and relocalization all work on these descriptors transparently. We modify the detector; the descriptor format is held fixed.
+BRIEF is computed from intensity comparisons at sampling locations relative to the keypoint center. It cares about local intensity structure but does not require the underlying point to be a FAST corner. Computing BRIEF at Shi-Tomasi corners produces descriptors of identical format (256-bit binary, same sampling pattern) to those produced by stock ORB-SLAM3 — bit-compatible. The DBoW2 vocabulary, loop closure matching, and relocalization all work on these descriptors transparently. We modify the detector; the descriptor format is held fixed. 
+
 ---
 
 ## 4. Per-Frame Pipeline
@@ -113,7 +125,11 @@ BRIEF is computed from intensity comparisons at sampling locations relative to t
 ### 4.1 State
 
 The frontend maintains a set of **active tracks** $\mathcal{T}_k$ at time $k$. Each track $\tau \in \mathcal{T}_k$ is a tuple:
-$$\tau = \left(\, \mathrm{id}_\tau,\, \mathbf{u}_k^\tau,\, \mathbf{d}_\tau,\, \ell_\tau,\, a_\tau,\, j_\tau \,\right)$$
+
+$$
+\tau = \left(\, \mathrm{id}_\tau,\, \mathbf{u}_k^\tau,\, \mathbf{d}_\tau,\, \ell_\tau,\, a_\tau,\, j_\tau \,\right)
+$$
+
 where:
 - $\mathrm{id}_\tau \in \mathbb{N}$ is a globally unique landmark identifier
 - $\mathbf{u}_k^\tau \in \mathbb{R}^2$ is the current pixel observation
@@ -136,24 +152,30 @@ The complete track lifecycle:
 
 | Phase | Active in $\mathcal{T}_k$? | In $\mathcal{D}_k$? | In local map $\mathcal{L}_k$? | Descriptor used for matching |
 |---|---|---|---|---|
-| **Infant** (born from Step 4, not yet triangulated) | Yes | No | No | Single-shot birth descriptor |
-| **Infant dies** (KLT fails before triangulation) | No | Yes (up to $\Delta_{\text{dormant}}$ frames) | No | Single-shot birth descriptor (used by Step 5) |
-| **Infant resurrected** (Step 5 match) | Yes (new track entry, original ID) | No (removed) | No | Single-shot birth descriptor |
-| **Adult** (triangulated into map point by local mapping) | Yes | No | Yes | Multi-observation $\bar{\mathbf{d}}^{(i)}$ |
-| **Adult dies** (KLT fails after triangulation) | No | **No** (discarded) | Yes | $\bar{\mathbf{d}}^{(i)}$ (used by Step 5b on next visibility) |
-| **Adult re-acquired** (Step 5b match against local map) | Yes (new track entry, map point preserved) | No | Yes | $\bar{\mathbf{d}}^{(i)}$ |
+| **Infant** | Yes | No | No | Single-shot birth descriptor |
+| **Infant dies** | No | Yes | No | Single-shot birth descriptor |
+| **Infant resurrected** | Yes | No | No | Single-shot birth descriptor |
+| **Adult** | Yes | No | Yes | Multi-observation representative descriptor |
+| **Adult dies** | No | No | Yes | Representative descriptor used by Step 5b |
+| **Adult re-acquired** | Yes | No | Yes | Representative descriptor |
 
-Transitions out of the dormant buffer happen via Step 5 (match → active) or via expiration (frame age > $\Delta_{\text{dormant}}$ → permanently discarded).
+Transitions out of the dormant buffer happen via Step 5 (match $\rightarrow$ active) or via expiration (frame age > $\Delta_{\text{dormant}} \rightarrow$ permanently discarded).
 
 ### 4.2 Step 1: Pyramidal Lucas-Kanade tracking
 
 Build Gaussian pyramids $\mathcal{P}_{k-1} = \{\mathcal{I}_{k-1}^{(0)}, \ldots, \mathcal{I}_{k-1}^{(L)}\}$ and $\mathcal{P}_k$ similarly, where $\mathcal{I}^{(l+1)}$ is $\mathcal{I}^{(l)}$ downsampled by factor 2 after Gaussian smoothing.
 
 For each track $\tau \in \mathcal{T}_{k-1}$, find the displacement $\mathbf{v}_\tau \in \mathbb{R}^2$ that minimizes the SSD over a window $\Omega$ centered on $\mathbf{u}_{k-1}^\tau$:
-$$\mathbf{v}_\tau^* = \arg\min_{\mathbf{v}} \sum_{\mathbf{x} \in \Omega} \Big[\, \mathcal{I}_{k-1}(\mathbf{u}_{k-1}^\tau + \mathbf{x}) - \mathcal{I}_k(\mathbf{u}_{k-1}^\tau + \mathbf{x} + \mathbf{v}) \,\Big]^2$$
+
+$$
+\mathbf{v}_\tau^* = \arg\min_{\mathbf{v}} \sum_{\mathbf{x} \in \Omega} \Big[\, \mathcal{I}_{k-1}(\mathbf{u}_{k-1}^\tau + \mathbf{x}) - \mathcal{I}_k(\mathbf{u}_{k-1}^\tau + \mathbf{x} + \mathbf{v}) \,\Big]^2
+$$
 
 Solved iteratively from coarsest to finest pyramid level, with the coarse displacement initializing the fine search. The Lucas-Kanade update at each iteration is:
-$$\Delta \mathbf{v} = \mathbf{H}^{-1} \mathbf{b}, \qquad \mathbf{H} = \sum_\Omega \nabla \mathcal{I}_k \nabla \mathcal{I}_k^\top, \qquad \mathbf{b} = \sum_\Omega \nabla \mathcal{I}_k \cdot \Delta \mathcal{I}$$
+
+$$
+\Delta \mathbf{v} = \mathbf{H}^{-1} \mathbf{b}, \qquad \mathbf{H} = \sum_\Omega \nabla \mathcal{I}_k \nabla \mathcal{I}_k^\top, \qquad \mathbf{b} = \sum_\Omega \nabla \mathcal{I}_k \cdot \Delta \mathcal{I}
+$$
 
 The new observation is $\mathbf{u}_k^\tau = \mathbf{u}_{k-1}^\tau + \mathbf{v}_\tau^*$.
 
@@ -162,13 +184,21 @@ We warp at translation-only resolution within each pyramid level. Affine warping
 ### 4.3 Step 2: Forward-backward consistency filter
 
 Re-track each $\mathbf{u}_k^\tau$ backward from $\mathcal{I}_k$ to $\mathcal{I}_{k-1}$, obtaining $\tilde{\mathbf{u}}_{k-1}^\tau$. Compute the FB error:
-$$\epsilon_\tau^{FB} = \left\| \mathbf{u}_{k-1}^\tau - \tilde{\mathbf{u}}_{k-1}^\tau \right\|_2$$
+
+$$
+\epsilon_\tau^{FB} = \left\| \mathbf{u}_{k-1}^\tau - \tilde{\mathbf{u}}_{k-1}^\tau \right\|_2
+$$
+
 and reject tracks where $\epsilon_\tau^{FB} > \theta_{FB}$ (typically $\theta_{FB} = 1$ px). This catches the case where KLT converges to a different nearby corner — the round trip would not return to the origin.
 
 ### 4.4 Step 3: Geometric outlier rejection
 
 Estimate the fundamental matrix $\mathbf{F}_{k-1,k}$ via RANSAC over the surviving tracks, using:
-$$\mathbf{u}_k^\tau{}^\top \, \mathbf{F}_{k-1,k} \, \mathbf{u}_{k-1}^\tau = 0$$
+
+$$
+\mathbf{u}_k^\tau{}^\top \, \mathbf{F}_{k-1,k} \, \mathbf{u}_{k-1}^\tau = 0
+$$
+
 for true correspondences (homogeneous coordinates). Reject tracks whose Sampson distance to the recovered epipolar geometry exceeds $\theta_{RANSAC}$.
 
 For stereo configurations we additionally enforce the stereo epipolar constraint between left and right images via precomputed extrinsics. This is cheap and removes mismatched stereo pairs.
@@ -180,18 +210,28 @@ The set of tracks surviving Steps 1–3 is denoted $\mathcal{T}_k^{\text{surv}}$
 Let $N_{\text{target}}$ be the desired active track count (typically 500–1000, matching ORB-SLAM3 default scale). If $|\mathcal{T}_k^{\text{surv}}| < N_{\text{target}}$, spawn new tracks.
 
 **4.5.1 Build occupancy mask.** To avoid clumping new detections near existing tracks, construct:
-$$\mathcal{M}_k(\mathbf{x}) = \begin{cases} 0 & \text{if } \exists\, \tau \in \mathcal{T}_k^{\text{surv}} : \|\mathbf{x} - \mathbf{u}_k^\tau\|_\infty < r_{\text{mask}} \\ 1 & \text{otherwise} \end{cases}$$
+
+$$
+\mathcal{M}_k(\mathbf{x}) = \begin{cases} 0 & \text{if } \exists\, \tau \in \mathcal{T}_k^{\text{surv}} : \|\mathbf{x} - \mathbf{u}_k^\tau\|_\infty < r_{\text{mask}} \\ 1 & \text{otherwise} \end{cases}
+$$
 
 **4.5.2 Shi-Tomasi detection.** Detect corners in $\mathcal{I}_k$ restricted to $\mathcal{M}_k$ by computing $\lambda_2(\mathbf{H}(\mathbf{x}))$ at every candidate pixel and accepting corners with $\lambda_2 \ge \theta_{ST}$, subject to non-maximum suppression at scale $r_{\text{nms}}$. This is the standard `goodFeaturesToTrack`-style detection.
 
 **4.5.3 Quadtree spatial distribution.** Apply ORB-SLAM3's quadtree distribution on the accepted Shi-Tomasi corners to enforce uniform spatial coverage. The quadtree recursively subdivides the image region until each leaf contains at most one keypoint or the target keypoint count is reached, retaining the highest-response corner per leaf. This is the spatial-spread benefit of ORB-SLAM3's design, decoupled from FAST.
 
 **4.5.4 Orientation.** For each retained corner $\mathbf{u}$, compute orientation via intensity centroid:
-$$m_{pq} = \sum_{x,y} x^p y^q \mathcal{I}(x + u_x,\, y + u_y), \qquad \theta = \arctan_2(m_{01},\, m_{10})$$
+
+$$
+m_{pq} = \sum_{x,y} x^p y^q \mathcal{I}(x + u_x,\, y + u_y), \qquad \theta = \arctan_2(m_{01},\, m_{10})$$
+
 with sums over a circular patch of radius 15 px (ORB default).
 
 **4.5.5 BRIEF descriptor.** Compute the steered BRIEF descriptor:
-$$d_i = \begin{cases} 1 & \text{if } \mathcal{I}(\mathbf{R}_\theta \mathbf{a}_i + \mathbf{u}) < \mathcal{I}(\mathbf{R}_\theta \mathbf{b}_i + \mathbf{u}) \\ 0 & \text{otherwise} \end{cases}, \quad i = 1 \ldots 256$$
+
+$$
+d_i = \begin{cases} 1 & \text{if } \mathcal{I}(\mathbf{R}_\theta \mathbf{a}_i + \mathbf{u}) < \mathcal{I}(\mathbf{R}_\theta \mathbf{b}_i + \mathbf{u}) \\ 0 & \text{otherwise} \end{cases}, \quad i = 1 \ldots 256
+$$
+
 where $(\mathbf{a}_i, \mathbf{b}_i)$ are the ORB-SLAM3 BRIEF sampling pattern and $\mathbf{R}_\theta$ is the 2D rotation by $\theta$ for rotation invariance.
 
 **4.5.6 Stereo: per-frame depth assignment for new features (stereo / RGB-D only).** In stereo configurations, ORB-SLAM3's `Frame` constructor expects every keypoint to have an assigned depth value (or "no depth" sentinel) immediately upon extraction. Local mapping uses this for fast triangulation of new map points without needing temporal parallax. Our hybrid pipeline must preserve this contract:
@@ -199,14 +239,18 @@ where $(\mathbf{a}_i, \mathbf{b}_i)$ are the ORB-SLAM3 BRIEF sampling pattern an
 1. Run Steps 4.5.1–4.5.5 on **both** the left and right rectified images, producing two candidate sets $\mathcal{S}_k^L$ and $\mathcal{S}_k^R$. The dormant buffer, KLT tracking, and active-track set $\mathcal{T}_k$ are maintained over the left image only; the right image is used solely for depth computation at extraction time.
 
 2. For each candidate $(\mathbf{u}_k^{(j),L}, \mathbf{d}_k^{(j),L}) \in \mathcal{S}_k^L$, search along its rectified epipolar line in $\mathcal{S}_k^R$ for a match satisfying:
-   - Same pyramid level (within ±1 octave)
+   - Same pyramid level (within $\pm$1 octave)
    - $|v^L - v^R| < \theta_{\text{stereo-row}}$ (rectified row alignment, typically 1 px)
    - $u^L > u^R$ (positive disparity)
    - $d_H(\mathbf{d}_k^{(j),L}, \mathbf{d}_k^{(j'),R}) < \theta_{\text{stereo-desc}}$
    - SAD block match around the predicted disparity to obtain sub-pixel disparity
 
 3. Compute depth from disparity using the stereo baseline $b$ and focal length $f$:
-$$z^{(j)} = \frac{f \cdot b}{u^{L,(j)} - u^{R,(j)}}$$
+
+$$
+z^{(j)} = \frac{f \cdot b}{u^{L,(j)} - u^{R,(j)}}
+$$
+
 and attach it to the left-image candidate. Candidates with no valid right-image match are kept as monocular features (no depth), exactly as stock ORB-SLAM3 does for points outside the stereo overlap region.
 
 4. KLT tracking (Steps 1–3) operates on left-image positions only. After Step 3, **recompute disparity for each surviving track each frame** via SAD block matching on a small search range around the previous frame's disparity. This is the cheapest way to maintain valid stereo depths through KLT-tracked frames; the alternative of independently KLT-tracking both left and right images is more expensive and offers no accuracy benefit because the rectified epipolar constraint already pins the right position to a 1D search.
@@ -216,7 +260,11 @@ The resulting set of new candidate features $\mathcal{S}_k = \{(\mathbf{u}_k^{(j
 ### 4.6 Step 5: Re-identification of dormant tracks
 
 For each new candidate $(\mathbf{u}_k^{(j)},\, \mathbf{d}_k^{(j)}) \in \mathcal{S}_k$, search the dormant buffer $\mathcal{D}_k$ for matches:
-$$\tau^* = \arg\min_{\tau \in \mathcal{D}_k \,\cap\, \mathcal{W}(\mathbf{u}_k^{(j)},\, r_{\text{reid}})} \, d_H\!\left(\mathbf{d}_\tau, \mathbf{d}_k^{(j)}\right)$$
+
+$$
+\tau^* = \arg\min_{\tau \in \mathcal{D}_k \,\cap\, \mathcal{W}(\mathbf{u}_k^{(j)},\, r_{\text{reid}})} \, d_H\!\left(\mathbf{d}_\tau, \mathbf{d}_k^{(j)}\right)
+$$
+
 where $\mathcal{W}(\cdot, r_{\text{reid}})$ is the spatial window around the candidate (optionally propagated by the current motion model from the dormant track's last position).
 
 Accept the re-identification if $d_H(\mathbf{d}_{\tau^*},\, \mathbf{d}_k^{(j)}) < \theta_{\text{reid}}$. If accepted:
@@ -246,7 +294,11 @@ For each $\mathbf{p}_w^{(i)} \in \mathcal{L}_k$, compute:
 - Predicted pyramid level $\hat{\ell}_k^{(i)}$, estimated from the distance ratio to the map point's reference scale
 
 Then search for a match among the unmatched candidates in $\mathcal{S}_k$:
-$$j^* = \arg\min_{j \,\in\, \mathcal{S}_k^{\text{unmatched}} \,\cap\, \mathcal{W}(\hat{\mathbf{u}}_k^{(i)},\, r_{\text{TLM}}(\hat{\ell}_k^{(i)}))} \, d_H\!\left(\bar{\mathbf{d}}^{(i)},\, \mathbf{d}_k^{(j)}\right)$$
+
+$$
+j^* = \arg\min_{j \,\in\, \mathcal{S}_k^{\text{unmatched}} \,\cap\, \mathcal{W}(\hat{\mathbf{u}}_k^{(i)},\, r_{\text{TLM}}(\hat{\ell}_k^{(i)}))} \, d_H\!\left(\bar{\mathbf{d}}^{(i)},\, \mathbf{d}_k^{(j)}\right)
+$$
+
 where $\bar{\mathbf{d}}^{(i)}$ is the **representative descriptor** of map point $i$ (Section 5) and $r_{\text{TLM}}$ scales with the predicted pyramid level (typically 2–4 px at level 0, growing geometrically).
 
 Accept if $d_H(\bar{\mathbf{d}}^{(i)},\, \mathbf{d}_k^{(j^*)}) < \theta_{\text{TLM}}$. The new correspondence $(\mathbf{u}_k^{(j^*)},\, \mathbf{p}_w^{(i)})$ is added to $\mathcal{T}_k$ with $\mathrm{id}_\tau$ inherited from the map point and a **new KLT track is initialized** at that corner so subsequent frames track it via Step 1.
@@ -270,8 +322,12 @@ The correspondence set entering pose estimation is the union of:
 - TrackLocalMap correspondences from Step 5b
 
 Estimate $\mathbf{T}_{c_kw}$ by:
-$$\mathbf{T}_{c_kw}^* = \arg\min_{\mathbf{T}} \sum_{\tau \,:\, j_\tau \ne \emptyset} \rho\!\left( \left\| \mathbf{u}_k^\tau - \pi(\mathbf{K},\, \mathbf{T} \cdot \mathbf{p}_w^{(j_\tau)}) \right\|_{\Sigma_\tau}^2 \right)$$
-where $\rho(\cdot)$ is a Huber robust kernel and $\Sigma_\tau$ is the observation covariance scaled by pyramid level (higher octave → higher uncertainty), as in ORB-SLAM3.
+
+$$
+\mathbf{T}_{c_kw}^* = \arg\min_{\mathbf{T}} \sum_{\tau \,:\, j_\tau \ne \emptyset} \rho\!\left( \left\| \mathbf{u}_k^\tau - \pi(\mathbf{K},\, \mathbf{T} \cdot \mathbf{p}_w^{(j_\tau)}) \right\|_{\Sigma_\tau}^2 \right)
+$$
+
+where $\rho(\cdot)$ is a Huber robust kernel and $\Sigma_\tau$ is the observation covariance scaled by pyramid level (higher octave $\rightarrow$ higher uncertainty), as in ORB-SLAM3.
 
 The pose is then passed to local mapping, which performs local BA, triangulates new map points from tracks with sufficient parallax, and decides keyframe insertion. None of this changes from stock ORB-SLAM3.
 
@@ -291,11 +347,18 @@ This maintains the representative descriptor in line with the current appearance
 ### 5.1 Multi-observation descriptor set per map point
 
 For each map point $\mathbf{p}_w^{(i)}$, maintain a set of observation descriptors:
-$$\mathcal{O}_i = \left\{ \mathbf{d}_{k_1}^{(i)},\, \mathbf{d}_{k_2}^{(i)},\, \ldots,\, \mathbf{d}_{k_n}^{(i)} \right\}$$
+
+$$
+\mathcal{O}_i = \left\{ \mathbf{d}_{k_1}^{(i)},\, \mathbf{d}_{k_2}^{(i)},\, \ldots,\, \mathbf{d}_{k_n}^{(i)} \right\}
+$$
+
 where each entry is the descriptor computed at keyframe $k_j$'s observation of landmark $i$. Descriptors are added only at keyframes, not every frame, both for storage efficiency and because non-keyframe descriptors add noise without information (consecutive frames yield highly correlated descriptors).
 
 The **representative descriptor** used for matching (in Steps 5b, loop closure, relocalization) is the observation with minimum median Hamming distance to all other observations:
-$$\bar{\mathbf{d}}^{(i)} = \arg\min_{\mathbf{d} \in \mathcal{O}_i} \; \mathrm{median}_{\mathbf{d}' \in \mathcal{O}_i \setminus \{\mathbf{d}\}} \, d_H(\mathbf{d},\, \mathbf{d}')$$
+
+$$
+\bar{\mathbf{d}}^{(i)} = \arg\min_{\mathbf{d} \in \mathcal{O}_i} \; \mathrm{median}_{\mathbf{d}' \in \mathcal{O}_i \setminus \{\mathbf{d}\}} \, d_H(\mathbf{d},\, \mathbf{d}')
+$$
 
 This is exactly ORB-SLAM3's `MapPoint::ComputeDistinctiveDescriptors`. The median-of-pairwise-distances criterion picks the "most central" observation in the cluster, which is robust to outliers from single bad-quality observations (motion blur, transient occlusion, brief turbidity spike).
 
@@ -308,16 +371,15 @@ Two cases:
 **Case B**: at this keyframe, the track was carried by KLT from a previous frame. KLT only updates pixel position; it does not produce a descriptor. We have two options:
 
 1. **Compute BRIEF on the fly at the current KLT pixel location.** Requires running the orientation step and BRIEF computation, but the corner location is already known. Cost: ~1 ms per track in C++.
-
 2. **Reuse the descriptor from the most recent keyframe where the track was matched in Step 5b.** Cheaper but staler.
 
-We choose option 1. The compute cost at keyframe rate (≪ frame rate) is negligible, and it ensures the keyframe's descriptor reflects the keyframe's actual appearance rather than a prior keyframe's. This is the same choice ORB-SLAM3 implicitly makes (its descriptors are always computed at the current keyframe).
+We choose option 1. The compute cost at keyframe rate ($\ll$ frame rate) is negligible, and it ensures the keyframe's descriptor reflects the keyframe's actual appearance rather than a prior keyframe's. This is the same choice ORB-SLAM3 implicitly makes (its descriptors are always computed at the current keyframe).
 
 ### 5.3 Update schedule
 
 - $\mathcal{O}_i$ grows by one entry each time the corresponding track is observed in a new keyframe.
 - $\bar{\mathbf{d}}^{(i)}$ is recomputed whenever $\mathcal{O}_i$ changes.
-- For long-lived map points, $|\mathcal{O}_i|$ may be bounded (ORB-SLAM3 does not explicitly bound it; the local map size limits the working set anyway). In our environment, where individual surfaces may be tracked across hundreds of keyframes, an explicit cap (e.g., 50) may be warranted for memory reasons.
+- For long-lived map points, $|\mathcal{O}_i|$ may be bounded (ORB-SLAM3 does not explicitly bound it; the local map size limits the memory working set anyway). In our environment, where individual surfaces may be tracked across hundreds of keyframes, an explicit cap (e.g., 50) may be warranted for memory reasons.
 
 ### 5.4 The asymmetry between active tracks, dormant tracks, and map points
 
@@ -325,9 +387,9 @@ We choose option 1. The compute cost at keyframe rate (≪ frame rate) is neglig
 |---|---|---|
 | Active track, not yet a map point | Birth descriptor (single shot) | Carried forward through KLT |
 | Dormant track | Birth descriptor (single shot) | Step 5 re-ID |
-| Map point with observations | Representative $\bar{\mathbf{d}}^{(i)}$ over multi-observation set | Step 5b TLM, loop closure, relocalization |
+| Map point with observations | Representative configuration | Step 5b TLM, loop closure, relocalization |
 
-Step 5 is the weakest because both sides are single-shot. Step 5b is much stronger because the local map side uses $\bar{\mathbf{d}}^{(i)}$.
+Step 5 is the weakest because both sides are single-shot. Step 5b is much stronger because the local map side uses the multi-observation representative descriptor array.
 
 ---
 
@@ -340,7 +402,10 @@ The backend operates on keyframes containing `(KeyPoint, descriptor, octave)` tu
 ### 6.2 Bag-of-Words for place recognition
 
 DBoW2 converts each keyframe's descriptor set into a compact BoW vector $\mathbf{v}_{\text{BoW}} \in \mathbb{R}^V$ over a pre-trained vocabulary of $V$ visual words (a hierarchical k-means tree built offline). Place recognition queries are nearest-neighbor lookups in BoW space, scored by:
-$$s(\mathbf{v}_1,\, \mathbf{v}_2) = 1 - \frac{1}{2} \left\| \frac{\mathbf{v}_1}{\|\mathbf{v}_1\|_1} - \frac{\mathbf{v}_2}{\|\mathbf{v}_2\|_1} \right\|_1$$
+
+$$
+s(\mathbf{v}_1,\, \mathbf{v}_2) = 1 - \frac{1}{2} \left\| \frac{\mathbf{v}_1}{\|\mathbf{v}_1\|_1} - \frac{\mathbf{v}_2}{\|\mathbf{v}_2\|_1} \right\|_1
+$$
 
 Candidate matches above a similarity threshold proceed to geometric verification.
 
@@ -393,7 +458,7 @@ The query uses standard ORB extraction (FAST + BRIEF) on the relocalization fram
 
 1. Collect ~10,000 frames spanning the diversity of operating conditions (turbid/clear, various surfaces, various lighting).
 2. Run the hybrid frontend (or stock ORB-SLAM3's ORB extractor) on these frames and accumulate all extracted BRIEF descriptors.
-3. Build the hierarchical k-means tree with DBoW2's `create_voc_step` utility. Standard parameters: branching factor 10, depth 6 → $10^6$ visual words.
+3. Build the hierarchical k-means tree with DBoW2's `create_voc_step` utility. Standard parameters: branching factor 10, depth 6 $\rightarrow$ $10^6$ visual words.
 4. Save the resulting vocabulary file and point ORB-SLAM3 at it via the config.
 
 This is offline, one-time, roughly 30 minutes of compute. **Skip this step and the system will produce confidently wrong loop closures.**
@@ -443,7 +508,7 @@ This separates algorithmic correctness (do the modules work in isolation on synt
 
 **7.4.3 Map-corruption canaries.** Add lightweight runtime checks that detect known corruption patterns:
 
-- Sudden jumps in map point count (Δ > some threshold per frame): likely indicates a bad keyframe insertion.
+- Sudden jumps in map point count ($\Delta$ > some threshold per frame): likely indicates a bad keyframe insertion.
 - Average reprojection error rising: BA is failing, likely due to bad correspondences.
 - Loop closure inlier ratio < threshold but acceptance still occurring: vocabulary or geometric verification misconfigured.
 
@@ -480,8 +545,6 @@ Starting values; all are subject to empirical tuning on real data.
 | $\theta_{\text{TLM}}$ | TLM Hamming threshold | 50/256 | Standard ORB-SLAM3 value |
 | $\theta_{\text{stereo-row}}$ | Stereo row alignment tolerance (rectified) | 1 px | Tighter for well-calibrated cameras |
 | $\theta_{\text{stereo-desc}}$ | Stereo descriptor Hamming threshold | 50/256 | Same as TLM |
-| Vocab branching factor | DBoW2 | 10 | Standard |
-| Vocab depth | DBoW2 | 6 | Standard, $10^6$ words |
 
 ---
 
@@ -508,17 +571,11 @@ Estimate: ~500–1000 lines of net new C++ code, plus ~500 lines of modified exi
 ### 9.2 Suggested order of work
 
 1. **Standalone modules first** (no ORB-SLAM3 dependency). `DormantTrackBuffer`, `SpatialDescriptorMatcher`. Full unit tests on synthetic inputs. Should compile and pass tests outside the ORB-SLAM3 source tree.
-
 2. **Python proof-of-concept of Steps 1–5** on the existing 3,822-frame sequence. Builds on the existing `compare_trackers.py` infrastructure. Validates the matching thresholds and re-ID success rate before committing to C++. Adds a track-ID system to KLT and measures the re-ID precision/recall on synthetic dropouts (force KLT failures and see whether Step 5 resurrects the right track).
-
 3. **Modify `ORBextractor`** to detect Shi-Tomasi instead of FAST. Run stock ORB-SLAM3 with this change on standard datasets (KITTI, TUM). Sanity check: performance should be roughly equivalent — Shi-Tomasi is not dramatically different from FAST on terrestrial imagery, so this swap alone shouldn't break anything. If KITTI/TUM results regress significantly, we have a bug.
-
 4. **Retrain vocabulary** on collected footage. Run loop closure regression tests against held-out underwater sequences.
-
 5. **Integrate Steps 1–5 into `Tracking.cc`**. Maintain a feature flag (`USE_HYBRID_FRONTEND`) to allow A/B comparison with stock ORB-SLAM3.
-
 6. **Integrate Step 5b** (modify TrackLocalMap to operate on $\mathcal{S}_k^{\text{unmatched}}$).
-
 7. **End-to-end testing** on full sequences. Compare ATE/RPE against stock ORB-SLAM3 on our own data and on KITTI as a non-regression check.
 
 ### 9.3 Tests
@@ -536,9 +593,7 @@ Beyond unit tests on the new modules, end-to-end tests should include:
 These cannot be settled from theory and need to be answered with data before committing fully:
 
 1. **Does descriptor matching work at keyframe scale on our imagery?** We have evidence it fails frame-to-frame, but we have not directly tested keyframe-to-keyframe matching (separated by 10–30 frames). If this also fails, the loop closure mechanism will not work regardless of vocabulary retraining, and we need to revisit Section 7.2's escalation to learned descriptors. **Concrete test**: from our existing sequence, sample frame pairs separated by 10, 20, 30 frames. Run ORB matching with geometric verification. Plot inlier ratio vs separation. If it stays high (> 0.5) at 30 frames, we're in good shape. If it collapses by 20, we have a problem.
-
 2. **What is the empirical re-identification rate of Step 5 on our data?** Forced-failure test: in the Python proof-of-concept, deliberately kill 10% of KLT tracks each frame and measure what fraction Step 5 correctly resurrects (i.e., assigns the original ID) versus incorrectly (assigns a different ID or fails to resurrect at all). Target: > 80% correct resurrection, < 1% incorrect resurrection.
-
 3. **How frequent are open-water sections in practice?** Determines whether mode-switching is a marginal concern or a central design constraint. Inspect existing footage and report fraction of frames flagged as open-water under the current criteria.
 
 ---
@@ -554,7 +609,7 @@ These cannot be settled from theory and need to be answered with data before com
 | 5 | Re-ID against dormant buffer | `SpatialDescriptorMatcher` | $\mathcal{S}_k$, $\mathcal{D}_k$ | Resurrected track IDs |
 | 5b | TrackLocalMap | `SpatialDescriptorMatcher` | $\mathcal{S}_k^{\text{unmatched}}$, $\mathcal{L}_k$, $\hat{\mathbf{T}}_{c_kw}$ | New tracks bound to existing map points |
 | 6 | Motion-only BA | LM + Huber | All correspondences | Refined $\mathbf{T}_{c_kw}$ |
-| 7 | Keyframe insertion + descriptor update | ORB-SLAM3 + §5.1 | Map points observed at keyframe | Updated $\bar{\mathbf{d}}^{(i)}$ |
+| 7 | Keyframe insertion + descriptor update | ORB-SLAM3 + §5.1 | Map points observed at keyframe | Updated configuration arrays |
 
 End of frame; loop to next frame.
 
