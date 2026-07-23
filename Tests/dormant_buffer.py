@@ -37,6 +37,10 @@ class DormantTrack:
     frame_died: int
     octave: int = 0
     map_point: object = None  # MUST be None for dormant tracks (§4.1)
+    # Track age (frames survived) at the moment of death. Carried back
+    # onto the resurrected track so an established landmark stays
+    # "established" for age-gated logic downstream.
+    age_at_death: int = 0
 
 
 class DormantTrackBuffer:
@@ -113,6 +117,26 @@ class DormantTrackBuffer:
     def clear(self) -> None:
         """Drop all entries (used on relocalization, §6.4)."""
         self._entries.clear()
+
+    def translate_all(self, dx: float, dy: float) -> None:
+        """Shift every entry's predicted position by (dx, dy).
+
+        Used for motion compensation (§4.6: the spatial window is
+        "optionally propagated by the current motion model from the
+        dormant track's last position"). Callers apply the dominant
+        image motion of the current frame (e.g. median KLT flow of
+        RANSAC-inlier survivors) once per frame so that (last_x, last_y)
+        becomes the *predicted* pixel location of the dormant landmark
+        in the current frame rather than the raw location at death.
+
+        NOTE (C++ parity): DormantTrackBuffer.h does not have this
+        method yet; add it there before porting the frontend.
+        """
+        if dx == 0.0 and dy == 0.0:
+            return
+        for e in self._entries:
+            e.last_x += dx
+            e.last_y += dy
 
     # ---- query -----------------------------------------------------
 

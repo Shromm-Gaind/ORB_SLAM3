@@ -77,6 +77,19 @@ class MatchOptions:
     default_radius: float = 20.0      # px — r_reid (§4.6) or r_TLM (§4.7)
     hamming_threshold: int = 50       # inclusive (§8)
     unique_candidates: bool = False   # see C++ header doc
+    # Ambiguity (distinctiveness) gate, ORB-SLAM3-style. If > 0, a query
+    # is only matched when its best candidate beats the second-best
+    # spatially-gated candidate by at least this many Hamming bits:
+    #     second_best - best >= second_best_margin
+    # A query with a single spatial candidate passes trivially (nothing
+    # to be confused with). 0 disables the gate (legacy behaviour).
+    # This is the standard defence against descriptor aliasing on
+    # self-similar texture: when two nearby candidates look equally
+    # good, refusing to match (fresh ID; §4.6 says a missed re-ID is
+    # recoverable) beats guessing.
+    # NOTE (C++ parity): SpatialDescriptorMatcher.h does not have this
+    # option yet; add it there before porting the frontend.
+    second_best_margin: int = 0
 
 
 @dataclass
@@ -112,16 +125,23 @@ def spatial_descriptor_match(
         # Hamming on the spatially-gated subset only.
         idxs = np.flatnonzero(spatial_mask)
         dists = hamming_distance_batch(q.descriptor, cand_desc[idxs])
-        # Filter by Hamming threshold and pick the minimum.
-        hamming_mask = dists <= opts.hamming_threshold
-        if not hamming_mask.any():
+        best_local = int(np.argmin(dists))
+        best_dist = int(dists[best_local])
+        # Gate 1: Hamming threshold (inclusive).
+        if best_dist > opts.hamming_threshold:
             continue
-        valid_dists = dists[hamming_mask]
-        valid_idxs = idxs[hamming_mask]
-        best_local = int(np.argmin(valid_dists))
+        # Gate 2: distinctiveness — the best must beat the second-best
+        # spatially-gated candidate by the configured margin. The
+        # second-best is taken over ALL spatial candidates (not only
+        # those under the threshold): a competitor just above the
+        # threshold is still evidence of ambiguity.
+        if opts.second_best_margin > 0 and len(dists) > 1:
+            second_best = int(np.partition(dists, 1)[1])
+            if second_best - best_dist < opts.second_best_margin:
+                continue
         out[i] = Match(
-            candidate_index=int(valid_idxs[best_local]),
-            hamming_distance=int(valid_dists[best_local]),
+            candidate_index=int(idxs[best_local]),
+            hamming_distance=best_dist,
         )
 
     # Optional second pass: enforce unique candidates.

@@ -34,9 +34,12 @@ import numpy as np
 # Reuse the user's existing quadtree distribution (faithful port of
 # ORB-SLAM3's spatial distribution). Importing rather than copying so
 # any future fixes to feature_comparison.py propagate here.
-sys.path.insert(0, str(Path(__file__).parent.parent / "python"))
-# The user's file is feature_comparison.py at the uploads root.
-sys.path.insert(0, "/mnt/user-data/uploads")
+# BUGFIX: this used to insert a hard-coded "/mnt/user-data/uploads"
+# ahead of everything, which silently shadowed the sibling modules
+# (dormant_buffer, spatial_descriptor_matcher, feature_comparison) with
+# stale copies from a different directory. Import siblings from THIS
+# file's directory.
+sys.path.insert(0, str(Path(__file__).parent))
 from feature_comparison import _distribute_quadtree  # noqa: E402
 
 from dormant_buffer import DormantTrack, DormantTrackBuffer  # noqa: E402
@@ -78,10 +81,38 @@ class HybridConfig:
     # Step 5 — Re-ID against dormant buffer
     dormant_horizon_frames: int = 30      # Δ_dormant
     reid_radius_px: float = 20.0          # r_reid
-    reid_hamming_threshold: int = 50      # θ_reid
+    reid_hamming_threshold: int = 32      # θ_reid
+    # Distinctiveness gate: best match must beat the second-best spatial
+    # candidate by this many Hamming bits (0 disables). See
+    # MatchOptions.second_best_margin.
+    reid_second_best_margin: int = 10
+    # Motion-compensate dormant predicted positions each frame using the
+    # median KLT flow of RANSAC-inlier survivors (§4.6 "optionally
+    # propagated by the current motion model"). Lets r_reid be tightened.
+    motion_compensate_dormant: bool = True
+    # A naturally-dying track must have survived at least this many
+    # frames to be worth buffering for re-ID. Short-lived tracks are
+    # mostly detector noise; buffering them (especially in bulk during
+    # low-quality sections) floods the buffer with impostors. Does NOT
+    # apply to force_kill(), which buffers unconditionally (the forced-
+    # failure harness filters its kill sample by age instead).
+    dormant_min_track_age: int = 3
+    # Bias Step 4's corner selection toward dormant predicted positions:
+    # detected corners falling within reid_radius_px of a dormant entry
+    # are kept preferentially (up to the deficit) before quadtree
+    # distribution fills the rest. Without this, a small deficit spread
+    # over the whole image rarely re-detects a recently-died landmark's
+    # spot, so Step 5 never gets a candidate to match ("missed" for
+    # detection reasons, not matching reasons).
+    seed_corners_near_dormant: bool = True
 
     # Tracking-lost threshold (§8 N_min)
     min_active_tracks: int = 50
+
+    # Diagnostics — gather per-query spatial candidate counts, per-match
+    # Hamming distances, and resurrected-entry ages. Cost is dominated by
+    # numpy per-frame work, modest even with large dormant buffers.
+    collect_diagnostics: bool = True
 
 
 # --------------------------------------------------------------------
@@ -97,6 +128,12 @@ class ActiveTrack:
     octave: int = 0
     age: int = 0
     map_point: object = None       # always None in this POC (no backend)
+    # Diagnostics only (collect_diagnostics=True): the fresh descriptor
+    # computed at this track's position on the previous frame, used to
+    # measure 1-frame same-track drift (the distribution θ_reid should
+    # be calibrated against, now that dormant entries store death-time
+    # descriptors and dormancy gaps are 1-2 frames).
+    diag_prev_descriptor: Optional[np.ndarray] = None
 
 
 # --------------------------------------------------------------------
@@ -127,6 +164,43 @@ class FrameResult:
     # Optional: which tracks got resurrected this frame, list of resurrected ids.
     resurrected_ids: list[int] = field(default_factory=list)
 
+    # ---- Step 5 diagnostics (populated only when verbose stats are on) ----
+    # How many dormant entries fall inside each query's spatial gate.
+    # One entry per Step 5 query (= per new corner). Tells us whether the
+    # spatial filter is doing real work or whether the matcher is being
+    # asked to discriminate among many candidates per query.
+    spatial_candidates_per_query: list[int] = field(default_factory=list)
+    # Hamming distance of each accepted match. Mostly low (0-15) = good,
+    # mostly near threshold = matcher is sneaking through noise.
+    accepted_hamming_distances: list[int] = field(default_factory=list)
+    # Age in frames of resurrected dormant entries. Mostly 1-3 = strong
+    # signal, mostly 25-30 = probably stale-matching noise.
+    resurrected_ages: list[int] = field(default_factory=list)
+    # Hamming distance between a surviving track's birth descriptor and
+    # its descriptor recomputed at the new (KLT-tracked, FB+RANSAC-verified)
+    # position. This is the descriptor's intra-feature stability — a
+    # ground-truth distribution for what "Hamming distance for the same
+    # physical point" looks like on this footage. The matcher's accepted-
+    # Hamming distribution should ideally lie at or below this one.
+    same_track_hamming_distances: list[int] = field(default_factory=list)
+    # Same idea, but between the descriptors recomputed on consecutive
+    # frames (1-frame gap) for the same surviving track. Since dormant
+    # entries now store the death-time descriptor and dormancy gaps are
+    # ~1-2 frames, THIS is the distribution θ_reid should be calibrated
+    # against (e.g. p90 plus a small allowance).
+    same_track_gap1_hamming_distances: list[int] = field(default_factory=list)
+
+    # Dominant image motion this frame: median (dx, dy) of RANSAC-inlier
+    # KLT flow. (0, 0) when too few survivors. Used for motion
+    # compensation of dormant predictions, and by the forced-failure
+    # harness to propagate expected resurrection locations.
+    median_flow: tuple[float, float] = (0.0, 0.0)
+    # Pixel locations of the new Shi-Tomasi corners detected in Step 4
+    # (post mask + quadtree, pre re-ID). Lets the harness distinguish
+    # "missed because no corner ever appeared there" from "missed
+    # because the matcher rejected it".
+    new_corner_positions: list[tuple[float, float]] = field(default_factory=list)
+
 
 # --------------------------------------------------------------------
 # Step 4 helpers — Shi-Tomasi + quadtree + steered BRIEF
@@ -155,8 +229,9 @@ def _build_occupancy_mask(img_shape: tuple[int, int],
 
 
 def _detect_shi_tomasi_with_quadtree(
-    gray: np.ndarray, mask: np.ndarray, target_n: int,
-    quality: float, min_distance: int, block_size: int,
+        gray: np.ndarray, mask: np.ndarray, target_n: int,
+        quality: float, min_distance: int, block_size: int,
+        priority_map: Optional[np.ndarray] = None,
 ) -> list[cv2.KeyPoint]:
     """Detect Shi-Tomasi corners constrained by `mask`, then enforce
     spatial spread with the ORB-SLAM3 quadtree.
@@ -186,15 +261,81 @@ def _detect_shi_tomasi_with_quadtree(
         xi = int(np.clip(round(x), 0, w - 1))
         yi = int(np.clip(round(y), 0, h - 1))
         kps.append(cv2.KeyPoint(x=x, y=y, size=7, response=float(eig[yi, xi])))
+    # Priority selection: corners falling inside `priority_map` (True =
+    # near a dormant predicted position) are kept first, best-response
+    # first, before the quadtree fills the remainder from the rest.
+    # Total is still capped at target_n, so the dark-section case (huge
+    # dormant buffer covering the whole image) cannot blow up the count.
+    if priority_map is not None and len(kps) > target_n:
+        near, far = [], []
+        for kp in kps:
+            xi = int(np.clip(round(kp.pt[0]), 0, w - 1))
+            yi = int(np.clip(round(kp.pt[1]), 0, h - 1))
+            (near if priority_map[yi, xi] else far).append(kp)
+        near.sort(key=lambda k: -k.response)
+        keep = near[:target_n]
+        remaining = target_n - len(keep)
+        if remaining > 0:
+            if len(far) > remaining:
+                keep += _distribute_quadtree(far, w, h, remaining)
+            else:
+                keep += far
+        return keep
     # Quadtree distribution (uses kp.pt and kp.response).
     if len(kps) > target_n:
         kps = _distribute_quadtree(kps, w, h, target_n)
     return kps
 
 
+def _descriptors_at_positions(
+        gray: np.ndarray, xy: list[tuple[float, float]],
+        orb: cv2.ORB, patch_size: int,
+) -> dict[int, np.ndarray]:
+    """Compute steered-BRIEF descriptors at caller-specified positions.
+
+    Returns {input_index: descriptor uint8 (32,)}. Positions whose patch
+    falls off the image border are silently absent from the result (ORB
+    drops them); callers must handle missing keys with a fallback.
+
+    Alignment between input positions and returned rows uses the
+    kp.class_id tag (ORB.compute preserves it through drops).
+    """
+    if not xy:
+        return {}
+    kps = []
+    for i, (x, y) in enumerate(xy):
+        kp = cv2.KeyPoint(x=float(x), y=float(y), size=float(patch_size))
+        kp.class_id = i
+        kps.append(kp)
+    kept, desc = orb.compute(gray, kps)
+    out: dict[int, np.ndarray] = {}
+    if desc is None:
+        return out
+    for row_idx, kp in enumerate(kept):
+        if 0 <= kp.class_id < len(xy):
+            out[kp.class_id] = desc[row_idx]
+    return out
+
+
+def _stamp_squares(shape: tuple[int, int],
+                   centers_xy: np.ndarray, radius: float) -> np.ndarray:
+    """Boolean map with True inside an L-infinity square of `radius`
+    around each center. Used to tag detected corners that fall near a
+    dormant predicted position (Step 4 seeding)."""
+    h, w = shape
+    hit = np.zeros((h, w), dtype=bool)
+    r = int(round(radius))
+    for cx, cy in centers_xy:
+        x0 = max(0, int(round(cx)) - r); x1 = min(w, int(round(cx)) + r + 1)
+        y0 = max(0, int(round(cy)) - r); y1 = min(h, int(round(cy)) + r + 1)
+        if x0 < x1 and y0 < y1:
+            hit[y0:y1, x0:x1] = True
+    return hit
+
+
 def _compute_steered_brief(
-    gray: np.ndarray, kps: list[cv2.KeyPoint],
-    orb: cv2.ORB, patch_size: int,
+        gray: np.ndarray, kps: list[cv2.KeyPoint],
+        orb: cv2.ORB, patch_size: int,
 ) -> tuple[list[cv2.KeyPoint], np.ndarray]:
     """Compute ORB's steered BRIEF on caller-provided keypoints.
 
@@ -297,9 +438,24 @@ class HybridFrontend:
         self.frame_index += 1
         cfg = self.cfg
 
+        # Purge stale dormant entries every frame. Doing this in Step 4
+        # only — as a prior version did — leaves the buffer growing
+        # unboundedly on frames where the active set is at/above target
+        # and Step 4 doesn't fire. The horizon Δ_dormant is supposed to
+        # cap buffer size at roughly (horizon × per-frame spawn rate).
+        self.dormant_buffer.purge_older_than(self.frame_index)
+
         tracks_in = len(self.active_tracks)
         died_this_frame: list[tuple[int, float, float]] = []
         resurrected_ids: list[int] = []
+        # Step 5 diagnostic accumulators (populated only when enabled)
+        spatial_candidates_per_query: list[int] = []
+        accepted_hamming: list[int] = []
+        resurrected_ages: list[int] = []
+        same_track_hamming: list[int] = []
+        same_track_gap1: list[int] = []
+        new_corner_positions: list[tuple[float, float]] = []
+        flow_dx, flow_dy = 0.0, 0.0
 
         # ============== Step 1: KLT track active features ==============
         if self.active_tracks:
@@ -324,7 +480,7 @@ class HybridFrontend:
             )
             fb_err = np.linalg.norm(
                 prev_pts.reshape(-1, 2) - back_pts.reshape(-1, 2), axis=1,
-            )
+                )
             klt_ok = (status_fwd.flatten() == 1) & (status_bwd.flatten() == 1)
             fb_ok = fb_err < cfg.fb_threshold_px
 
@@ -346,6 +502,22 @@ class HybridFrontend:
 
             tracks_after_ransac = int(inlier_mask.sum())
 
+            # Dominant image motion this frame: median flow over the
+            # RANSAC-inlier survivors. Robust to independent outliers
+            # (fish, particulates) as long as most of the scene moves
+            # with the camera.
+            if inlier_mask.any():
+                d = surv_curr[inlier_mask] - surv_prev[inlier_mask]
+                flow_dx = float(np.median(d[:, 0]))
+                flow_dy = float(np.median(d[:, 1]))
+
+            # Motion-compensate existing dormant predictions BEFORE this
+            # frame's deaths are added (deaths are added already
+            # flow-adjusted below), so that every entry's (last_x, last_y)
+            # is its predicted location in the CURRENT frame.
+            if cfg.motion_compensate_dormant:
+                self.dormant_buffer.translate_all(flow_dx, flow_dy)
+
             # Kill any track that didn't survive Steps 1-3. Move to dormant
             # buffer (since all our tracks are infants in this POC).
             kept_ids: set[int] = set()
@@ -356,17 +528,88 @@ class HybridFrontend:
                     t.y = float(surv_curr[i, 1])
                     t.age += 1
                     kept_ids.add(tid)
+
+            # ---- Diagnostic: descriptor stability for surviving tracks ----
+            # For each track that survived KLT+FB+RANSAC, the new position
+            # is by construction the same physical point (KLT tracked it,
+            # FB+RANSAC verified it). Recompute the BRIEF descriptor at
+            # the new location and Hamming-compare to the birth descriptor.
+            # The histogram of these distances tells us what "Hamming for
+            # the same physical feature" actually looks like on this
+            # footage — i.e., a ground truth for the matcher's threshold.
+            if cfg.collect_diagnostics and kept_ids:
+                surv_tracks = [self.active_tracks[tid]
+                               for i, tid in enumerate(surv_ids)
+                               if inlier_mask[i]]
+                fresh_map = _descriptors_at_positions(
+                    curr_gray, [(t.x, t.y) for t in surv_tracks],
+                    self._orb, cfg.descriptor_patch_size,
+                )
+                for src_idx, fresh in fresh_map.items():
+                    t = surv_tracks[src_idx]
+                    # (a) birth drift: how far the descriptor has walked
+                    # since the track was born. Explains why storing the
+                    # BIRTH descriptor in the dormant buffer was fatal.
+                    same_track_hamming.append(
+                        int(np.unpackbits(
+                            np.bitwise_xor(t.birth_descriptor, fresh)).sum())
+                    )
+                    # (b) 1-frame drift: same physical point, descriptors
+                    # recomputed on consecutive frames. This is the
+                    # distribution θ_reid should be calibrated against
+                    # now that dormant entries store death-time
+                    # descriptors and dormancy gaps are ~1-2 frames.
+                    if t.diag_prev_descriptor is not None:
+                        same_track_gap1.append(
+                            int(np.unpackbits(
+                                np.bitwise_xor(t.diag_prev_descriptor,
+                                               fresh)).sum())
+                        )
+                    t.diag_prev_descriptor = fresh
+
             # Everything in `ids` not in `kept_ids` dies.
-            for tid in ids:
-                if tid not in kept_ids:
+            #
+            # THE FIX for the stale-descriptor bug: the dormant entry
+            # stores the descriptor recomputed at the LAST SUCCESSFUL
+            # OBSERVATION — (t.x, t.y) on the previous frame, which is
+            # where KLT last verified this track — not the birth
+            # descriptor. On long-lived tracks the birth descriptor has
+            # drifted by ~50 bits (measured: same-track median 47 vs a
+            # θ_reid of 50), which capped forced-fail recall at ~47%.
+            # The death-time descriptor is at most 1 KLT step stale.
+            dying_ids = [tid for tid in ids if tid not in kept_ids]
+            if dying_ids:
+                death_desc = _descriptors_at_positions(
+                    self._prev_gray,
+                    [(self.active_tracks[tid].x, self.active_tracks[tid].y)
+                     for tid in dying_ids],
+                    self._orb, cfg.descriptor_patch_size,
+                )
+                for k_i, tid in enumerate(dying_ids):
                     t = self.active_tracks.pop(tid)
                     died_this_frame.append((tid, t.x, t.y))
-                    # POC: every dying track is an infant (map_point is None).
-                    # Add to dormant buffer for possible re-ID later.
+                    # Age gate: short-lived tracks are mostly detector
+                    # noise; buffering them in bulk (dark sections)
+                    # floods the buffer with impostors for Δ_dormant
+                    # frames. Their IDs are simply retired.
+                    if t.age < cfg.dormant_min_track_age:
+                        continue
+                    # Fall back to the birth descriptor only when the
+                    # death-time patch fell off the image border (those
+                    # tracks are usually unrecoverable anyway).
+                    stored = death_desc.get(k_i, t.birth_descriptor)
+                    # The last position is in previous-frame coordinates;
+                    # apply this frame's flow so the entry is stored as a
+                    # current-frame prediction like everything else.
+                    px, py = t.x, t.y
+                    if cfg.motion_compensate_dormant:
+                        px += flow_dx
+                        py += flow_dy
                     self.dormant_buffer.add(DormantTrack(
-                        id=tid, last_x=t.x, last_y=t.y,
-                        descriptor=t.birth_descriptor.copy(),
+                        id=tid, last_x=px, last_y=py,
+                        descriptor=np.asarray(stored, dtype=np.uint8).copy(),
                         frame_died=self.frame_index, octave=t.octave,
+                        age_at_death=t.age,
                     ))
         else:
             tracks_after_klt = 0
@@ -382,20 +625,36 @@ class HybridFrontend:
             mask = _build_occupancy_mask(
                 curr_gray.shape, self.active_tracks, cfg.occupancy_mask_radius,
             )
+            # Dormant seeding: prefer detected corners near a dormant
+            # predicted position, so a recently-died landmark's spot
+            # actually receives a candidate for Step 5 to match. With a
+            # small deficit and quadtree spread this otherwise almost
+            # never happens (the dominant "missed" mode at low kill
+            # fractions in the forced-failure test).
+            priority_map = None
+            if cfg.seed_corners_near_dormant and not self.dormant_buffer.empty():
+                dorm_xy = np.array(
+                    [[e.last_x, e.last_y]
+                     for e in self.dormant_buffer.all_entries()],
+                    dtype=np.float32,
+                )
+                priority_map = _stamp_squares(
+                    curr_gray.shape, dorm_xy, cfg.reid_radius_px,
+                )
             kps = _detect_shi_tomasi_with_quadtree(
                 curr_gray, mask, deficit,
                 cfg.shi_tomasi_quality, cfg.shi_tomasi_min_distance,
                 cfg.shi_tomasi_block_size,
+                priority_map=priority_map,
             )
             kept_kps, desc = _compute_steered_brief(
                 curr_gray, kps, self._orb, cfg.descriptor_patch_size,
             )
             new_corners_detected = len(kept_kps)
+            new_corner_positions = [(float(kp.pt[0]), float(kp.pt[1]))
+                                    for kp in kept_kps]
 
             # ============== Step 5: re-ID against dormant buffer ==========
-            # Purge stale entries first.
-            self.dormant_buffer.purge_older_than(self.frame_index)
-
             if kept_kps and not self.dormant_buffer.empty():
                 # For each candidate, look up the dormant tracks within
                 # r_reid of its location. We could do this in two ways:
@@ -429,8 +688,25 @@ class HybridFrontend:
                     default_radius=cfg.reid_radius_px,
                     hamming_threshold=cfg.reid_hamming_threshold,
                     unique_candidates=True,  # one dormant track resurrects to
-                                             # at most one new corner
+                    # at most one new corner
+                    second_best_margin=cfg.reid_second_best_margin,
                 )
+
+                # ---- Diagnostic: spatial candidate density per query ----
+                # Cheap: vectorise dormant positions and count per query
+                # how many fall inside the L∞ radius. This is what tells
+                # us whether the spatial filter is doing useful work.
+                if cfg.collect_diagnostics and all_dormant:
+                    dorm_xy = np.array([[e.last_x, e.last_y] for e in all_dormant],
+                                       dtype=np.float32)
+                    r = cfg.reid_radius_px
+                    for q in queries:
+                        dx = np.abs(dorm_xy[:, 0] - q.x)
+                        dy = np.abs(dorm_xy[:, 1] - q.y)
+                        spatial_candidates_per_query.append(
+                            int(((dx <= r) & (dy <= r)).sum())
+                        )
+
                 matches = spatial_descriptor_match(queries, candidates, opts)
                 reids_attempted = len(queries)
 
@@ -445,6 +721,12 @@ class HybridFrontend:
                             "unique_candidates should have prevented this"
                         )
                         used_dormant_ids.add(dormant.id)
+                        # ---- Diagnostic: per-match Hamming + age ----
+                        if cfg.collect_diagnostics:
+                            accepted_hamming.append(m.hamming_distance)
+                            resurrected_ages.append(
+                                self.frame_index - dormant.frame_died
+                            )
                         # Reuse the original ID. The new descriptor is the
                         # current corner's descriptor (a fresh birth
                         # descriptor for the resurrected infant — per the
@@ -453,7 +735,7 @@ class HybridFrontend:
                         # newer observation, so use that).
                         self._spawn_track(
                             kp.pt[0], kp.pt[1], desc[i], octave=0,
-                            id=dormant.id,
+                            id=dormant.id, age=dormant.age_at_death,
                         )
                         self.dormant_buffer.remove(dormant.id)
                         resurrected_ids.append(dormant.id)
@@ -481,6 +763,13 @@ class HybridFrontend:
             dormant_buffer_size=len(self.dormant_buffer),
             died_this_frame=died_this_frame,
             resurrected_ids=resurrected_ids,
+            spatial_candidates_per_query=spatial_candidates_per_query,
+            accepted_hamming_distances=accepted_hamming,
+            resurrected_ages=resurrected_ages,
+            same_track_hamming_distances=same_track_hamming,
+            same_track_gap1_hamming_distances=same_track_gap1,
+            median_flow=(flow_dx, flow_dy),
+            new_corner_positions=new_corner_positions,
         )
 
     def force_kill(self, track_ids: list[int]) -> list[tuple[int, float, float]]:
@@ -490,26 +779,45 @@ class HybridFrontend:
 
         Returns a list of (id, last_x, last_y) for the killed tracks.
         Should be called AFTER process_frame() so that the killed tracks
-        carry their just-tracked positions.
+        carry their just-tracked positions — which also means
+        self._prev_gray is already the CURRENT frame, so the death-time
+        descriptor is computed at the exact kill appearance.
+
+        Unlike natural deaths, force_kill buffers unconditionally
+        (no dormant_min_track_age gate): the caller explicitly asked for
+        these tracks to be resurrectable. The forced-failure harness is
+        expected to filter its kill sample by age instead.
         """
+        victims = [(tid, self.active_tracks[tid]) for tid in track_ids
+                   if tid in self.active_tracks]
+        death_desc = _descriptors_at_positions(
+            self._prev_gray, [(t.x, t.y) for _, t in victims],
+            self._orb, self.cfg.descriptor_patch_size,
+        )
         killed = []
-        for tid in track_ids:
-            t = self.active_tracks.pop(tid, None)
-            if t is None:
-                continue
+        for k_i, (tid, t) in enumerate(victims):
+            self.active_tracks.pop(tid)
             killed.append((tid, t.x, t.y))
+            stored = death_desc.get(k_i, t.birth_descriptor)
             self.dormant_buffer.add(DormantTrack(
                 id=tid, last_x=t.x, last_y=t.y,
-                descriptor=t.birth_descriptor.copy(),
+                descriptor=np.asarray(stored, dtype=np.uint8).copy(),
                 frame_died=self.frame_index, octave=t.octave,
+                age_at_death=t.age,
             ))
         return killed
 
     # ---- internal helpers --------------------------------------------
 
     def _spawn_track(self, x: float, y: float, descriptor: np.ndarray,
-                     octave: int = 0, id: Optional[int] = None) -> int:
-        """Create an active track and return its id."""
+                     octave: int = 0, id: Optional[int] = None,
+                     age: int = 0) -> int:
+        """Create an active track and return its id.
+
+        `age` is nonzero only for resurrections, where the dormant
+        entry's age_at_death is carried over so an established landmark
+        stays established for age-gated logic.
+        """
         if id is None:
             id = self._next_id
             self._next_id += 1
@@ -521,6 +829,6 @@ class HybridFrontend:
         self.active_tracks[id] = ActiveTrack(
             id=id, x=float(x), y=float(y),
             birth_descriptor=descriptor.astype(np.uint8).copy(),
-            octave=octave, age=0,
+            octave=octave, age=age,
         )
         return id

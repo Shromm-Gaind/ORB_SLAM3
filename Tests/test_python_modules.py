@@ -212,6 +212,116 @@ class TestMatcher:
         assert out[1] is None
 
 
+# ---------------- second_best_margin (distinctiveness gate) ----------------
+
+class TestMarginGate:
+    def test_ambiguous_rejected(self):
+        # Two candidates 5 bits apart < margin 10 -> refuse to match.
+        opts = MatchOptions(default_radius=50, hamming_threshold=256,
+                            second_best_margin=10)
+        q = [PixelQuery(100, 100, desc(0))]
+        c = [
+            PixelCandidate(101, 100, desc_with_bits(20)),
+            PixelCandidate(102, 100, desc_with_bits(25)),
+        ]
+        assert spatial_descriptor_match(q, c, opts)[0] is None
+
+    def test_distinct_accepted(self):
+        opts = MatchOptions(default_radius=50, hamming_threshold=256,
+                            second_best_margin=10)
+        q = [PixelQuery(100, 100, desc(0))]
+        c = [
+            PixelCandidate(101, 100, desc_with_bits(20)),
+            PixelCandidate(102, 100, desc_with_bits(60)),  # gap 40 >= 10
+        ]
+        out = spatial_descriptor_match(q, c, opts)
+        assert out[0] is not None
+        assert out[0].candidate_index == 0
+        assert out[0].hamming_distance == 20
+
+    def test_single_candidate_passes_trivially(self):
+        opts = MatchOptions(default_radius=50, hamming_threshold=256,
+                            second_best_margin=100)
+        q = [PixelQuery(100, 100, desc(0))]
+        c = [PixelCandidate(101, 100, desc_with_bits(20))]
+        out = spatial_descriptor_match(q, c, opts)
+        assert out[0] is not None
+
+    def test_competitor_above_threshold_still_blocks(self):
+        # Second-best is over the Hamming threshold, but its existence
+        # is still evidence of ambiguity — the margin applies to ALL
+        # spatially-gated candidates.
+        opts = MatchOptions(default_radius=50, hamming_threshold=22,
+                            second_best_margin=10)
+        q = [PixelQuery(100, 100, desc(0))]
+        c = [
+            PixelCandidate(101, 100, desc_with_bits(20)),  # passes threshold
+            PixelCandidate(102, 100, desc_with_bits(25)),  # over threshold
+        ]
+        assert spatial_descriptor_match(q, c, opts)[0] is None
+
+    def test_out_of_radius_competitor_ignored(self):
+        # A near-identical competitor OUTSIDE the spatial gate must not
+        # trigger the ambiguity rejection.
+        opts = MatchOptions(default_radius=5, hamming_threshold=256,
+                            second_best_margin=10)
+        q = [PixelQuery(100, 100, desc(0))]
+        c = [
+            PixelCandidate(101, 100, desc_with_bits(20)),
+            PixelCandidate(500, 500, desc_with_bits(21)),  # far away
+        ]
+        out = spatial_descriptor_match(q, c, opts)
+        assert out[0] is not None
+        assert out[0].candidate_index == 0
+
+    def test_margin_zero_is_legacy_behaviour(self):
+        opts = MatchOptions(default_radius=50, hamming_threshold=256,
+                            second_best_margin=0)
+        q = [PixelQuery(100, 100, desc(0))]
+        c = [
+            PixelCandidate(101, 100, desc_with_bits(20)),
+            PixelCandidate(102, 100, desc_with_bits(21)),
+        ]
+        out = spatial_descriptor_match(q, c, opts)
+        assert out[0] is not None
+        assert out[0].candidate_index == 0
+
+
+# ---------------- DormantTrackBuffer extras ----------------
+
+class TestDormantBufferExtras:
+    def make(self, tid, x, y, frame_died=0):
+        return DormantTrack(id=tid, last_x=x, last_y=y,
+                            descriptor=np.zeros(32, dtype=np.uint8),
+                            frame_died=frame_died)
+
+    def test_translate_all(self):
+        buf = DormantTrackBuffer(30)
+        buf.add(self.make(1, 100, 100))
+        buf.add(self.make(2, 200, 50))
+        buf.translate_all(3.0, -2.0)
+        hits = buf.query_within(103, 98, 0.5)
+        assert [e.id for e in hits] == [1]
+        hits = buf.query_within(203, 48, 0.5)
+        assert [e.id for e in hits] == [2]
+
+    def test_translate_all_zero_noop(self):
+        buf = DormantTrackBuffer(30)
+        buf.add(self.make(1, 100, 100))
+        buf.translate_all(0.0, 0.0)
+        assert [e.id for e in buf.query_within(100, 100, 0.5)] == [1]
+
+    def test_age_at_death_default_and_roundtrip(self):
+        t = self.make(1, 0, 0)
+        assert t.age_at_death == 0
+        t2 = DormantTrack(id=2, last_x=0, last_y=0,
+                          descriptor=np.zeros(32, dtype=np.uint8),
+                          frame_died=5, age_at_death=42)
+        buf = DormantTrackBuffer(30)
+        buf.add(t2)
+        assert buf.query_within(0, 0, 1)[0].age_at_death == 42
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))
