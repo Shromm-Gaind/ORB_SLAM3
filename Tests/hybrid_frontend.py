@@ -232,6 +232,7 @@ def _detect_shi_tomasi_with_quadtree(
         gray: np.ndarray, mask: np.ndarray, target_n: int,
         quality: float, min_distance: int, block_size: int,
         priority_map: Optional[np.ndarray] = None,
+        pool_n: Optional[int] = None,
 ) -> list[cv2.KeyPoint]:
     """Detect Shi-Tomasi corners constrained by `mask`, then enforce
     spatial spread with the ORB-SLAM3 quadtree.
@@ -240,8 +241,15 @@ def _detect_shi_tomasi_with_quadtree(
     cv2.KeyPoint objects (which is what we want anyway, to feed to
     ORB.compute() in the next step).
     """
+    # goodFeaturesToTrack keeps only the globally strongest maxCorners.
+    # With a small deficit that means ~2*deficit corners image-wide, and
+    # a killed landmark's (often mediocre-quality) corner rarely makes
+    # the cut — so dormant seeding has nothing near the dormant entries
+    # to prioritize. `pool_n` lets the caller widen the candidate pool
+    # when dormant entries exist; total output is still capped at
+    # target_n by the priority/quadtree selection below.
     pts = cv2.goodFeaturesToTrack(
-        gray, maxCorners=target_n * 2,   # over-detect; quadtree will thin
+        gray, maxCorners=(pool_n if pool_n is not None else target_n * 2),
         qualityLevel=quality, minDistance=min_distance,
         blockSize=block_size, mask=mask,
     )
@@ -632,6 +640,7 @@ class HybridFrontend:
             # never happens (the dominant "missed" mode at low kill
             # fractions in the forced-failure test).
             priority_map = None
+            pool_n = deficit * 2
             if cfg.seed_corners_near_dormant and not self.dormant_buffer.empty():
                 dorm_xy = np.array(
                     [[e.last_x, e.last_y]
@@ -641,11 +650,16 @@ class HybridFrontend:
                 priority_map = _stamp_squares(
                     curr_gray.shape, dorm_xy, cfg.reid_radius_px,
                 )
+                # Widen the detection pool so corners near dormant
+                # entries can enter it at all (capped to keep the dark-
+                # section worst case bounded).
+                pool_n = deficit * 2 + min(len(self.dormant_buffer), 500)
             kps = _detect_shi_tomasi_with_quadtree(
                 curr_gray, mask, deficit,
                 cfg.shi_tomasi_quality, cfg.shi_tomasi_min_distance,
                 cfg.shi_tomasi_block_size,
                 priority_map=priority_map,
+                pool_n=pool_n,
             )
             kept_kps, desc = _compute_steered_brief(
                 curr_gray, kps, self._orb, cfg.descriptor_patch_size,

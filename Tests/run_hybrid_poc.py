@@ -415,7 +415,8 @@ def plot_normal_summary(metrics_log: list[FrameResult], path: Path):
 def run_forced_fail(paths: list[Path], front: HybridFrontend, output: Path,
                     clahe: cv2.CLAHE | None,
                     kill_fraction: float, seed: int,
-                    spatial_tolerance_px: float):
+                    spatial_tolerance_px: float,
+                    tolerance_growth_px_per_frame: float = 0.25):
     """Run the sequence with synthetic forced KLT failures and measure
     re-ID precision/recall on Step 5.
 
@@ -503,6 +504,8 @@ def run_forced_fail(paths: list[Path], front: HybridFrontend, output: Path,
     # Track resurrections per frame so we can compute the expected
     # coincidence rate at the end.
     resurrections_per_frame: list[int] = []
+    # frame index -> RANSAC survival fraction (stability proxy)
+    frame_stability: dict[int, float] = {}
 
     # Per-frame stats CSV.
     csv_f = open(output / "forced_fail.csv", "w", newline="")
@@ -540,6 +543,12 @@ def run_forced_fail(paths: list[Path], front: HybridFrontend, output: Path,
         resurrections_per_frame.append(len(resurrection_locations))
 
         flow_dx, flow_dy = res.median_flow
+        # Frame stability proxy: fraction of tracks that survived the
+        # geometric gauntlet. Used to segment outcomes at the end
+        # (kills in dark/turbid sections are partly unwinnable and
+        # shouldn't be read the same as bright-section failures).
+        frame_stability[idx] = (res.tracks_after_ransac / res.tracks_in
+                                if res.tracks_in > 0 else 0.0)
         still_open: list[KillEvent] = []
         for ev in open_events:
             # Propagate the expected resurrection location by this
@@ -548,6 +557,15 @@ def run_forced_fail(paths: list[Path], front: HybridFrontend, output: Path,
             # matcher geometry).
             ev.exp_x += flow_dx
             ev.exp_y += flow_dy
+
+            # Effective tolerance grows with the kill-to-now gap: the
+            # expected location is propagated with a global-translation
+            # motion model, but real scenes have parallax and rotation,
+            # so prediction error accumulates with time. Without this,
+            # long-latency correct re-IDs get mis-scored as
+            # "same id, > tolerance".
+            gap = idx - ev.kill_frame
+            tol = spatial_tolerance_px + tolerance_growth_px_per_frame * gap
 
             # Expiry: more than `horizon` frames since the kill. The
             # dormant entry is gone from the buffer, so the outcome is
@@ -583,7 +601,7 @@ def run_forced_fail(paths: list[Path], front: HybridFrontend, output: Path,
                 dist = max(abs(rx - ev.exp_x), abs(ry - ev.exp_y))
                 ev.resurrection_dist = dist
                 ev.outcome_frame = idx
-                if dist <= spatial_tolerance_px:
+                if dist <= tol:
                     ev.outcome = "correct"
                     correct += 1
                 else:
@@ -601,8 +619,8 @@ def run_forced_fail(paths: list[Path], front: HybridFrontend, output: Path,
             # inflated 'incorrect' and stole would-be 'correct's).
             if ev.hijacked_by is None:
                 for other_id, (rx, ry) in resurrection_locations.items():
-                    if (abs(rx - ev.exp_x) <= spatial_tolerance_px and
-                            abs(ry - ev.exp_y) <= spatial_tolerance_px):
+                    if (abs(rx - ev.exp_x) <= tol and
+                            abs(ry - ev.exp_y) <= tol):
                         ev.hijacked_by = other_id
                         ev.hijack_frame = idx
                         break
@@ -611,8 +629,8 @@ def run_forced_fail(paths: list[Path], front: HybridFrontend, output: Path,
             # this frame? (Purely diagnostic; used to split misses.)
             if not ev.corner_seen:
                 for cx, cy in res.new_corner_positions:
-                    if (abs(cx - ev.exp_x) <= spatial_tolerance_px and
-                            abs(cy - ev.exp_y) <= spatial_tolerance_px):
+                    if (abs(cx - ev.exp_x) <= tol and
+                            abs(cy - ev.exp_y) <= tol):
                         ev.corner_seen = True
                         break
 
@@ -693,6 +711,37 @@ def run_forced_fail(paths: list[Path], front: HybridFrontend, output: Path,
     print(f"      corner appeared, matcher rejected (Step 5): {missed_matcher:6d}")
     print(f"  Precision (of attempts):   {100*precision:.2f}%")
 
+    # ---- Segment by kill-frame stability ----
+    # Kills that happen while the frontend is in a degraded section
+    # (RANSAC survival < 50%: dark / turbid / blurred frames) face a
+    # partly unwinnable task — detection is starved and descriptors are
+    # noise. Reporting them pooled with bright-section kills hides
+    # whether the matcher works when it has a fair chance.
+    def _seg(events):
+        c = sum(1 for e in events if e.outcome == "correct")
+        i = sum(1 for e in events if e.outcome == "incorrect")
+        mn = sum(1 for e in events if e.outcome == "missed_no_corner")
+        mm = sum(1 for e in events if e.outcome == "missed_matcher")
+        n = len(events)
+        return n, c, i, mn, mm
+
+    stable_evs = [e for e in resolved_events
+                  if frame_stability.get(e.kill_frame, 1.0) >= 0.5]
+    unstable_evs = [e for e in resolved_events
+                    if frame_stability.get(e.kill_frame, 1.0) < 0.5]
+    print()
+    print("  By kill-frame stability (RANSAC survival >= 50% at kill):")
+    for label, evs in (("stable frames", stable_evs),
+                       ("degraded frames", unstable_evs)):
+        n, c, i, mn, mm = _seg(evs)
+        if n == 0:
+            print(f"    {label:<16s} n=0")
+            continue
+        print(f"    {label:<16s} n={n:6d}  correct={100*c/n:5.1f}%  "
+              f"incorrect={100*i/n:5.1f}%  "
+              f"missed(no-corner)={100*mn/n:5.1f}%  "
+              f"missed(matcher)={100*mm/n:5.1f}%")
+
     # ---- Coincidence baseline ----
     # An "incorrect" event is recorded when ANY resurrected track lands
     # within spatial_tolerance_px of a kill location. With many
@@ -703,8 +752,11 @@ def run_forced_fail(paths: list[Path], front: HybridFrontend, output: Path,
     if resurrections_per_frame:
         # Per kill window, the probability that a uniformly-placed
         # resurrection lands inside is roughly tol_area / image_area
-        # (we use L∞ window, so tol_area = (2*tol)^2).
-        tol_area = (2.0 * spatial_tolerance_px) ** 2
+        # (we use L∞ window, so tol_area = (2*tol)^2). The tolerance
+        # grows with gap, so use its average over the horizon.
+        avg_tol = (spatial_tolerance_px +
+                   tolerance_growth_px_per_frame * horizon / 2.0)
+        tol_area = (2.0 * avg_tol) ** 2
         image_area = float(image_h * image_w)
         p_one_coincidence = min(1.0, tol_area / image_area)
         # Each kill is open for up to `horizon` frames. Sum over the
@@ -724,7 +776,7 @@ def run_forced_fail(paths: list[Path], front: HybridFrontend, output: Path,
         print(f"  Coincidence baseline:")
         print(f"    Expected incorrects from chance overlap: {expected_coincidences:6.0f}  "
               f"({100*expected_coincidences/total:.2f}%)")
-        print(f"    (kill window {2*spatial_tolerance_px:.0f}px on {image_w}x{image_h} image, "
+        print(f"    (avg kill window {2*avg_tol:.0f}px on {image_w}x{image_h} image, "
               f"~{avg_resurrections:.0f} resurrections/frame over {horizon}-frame horizon)")
         print(f"    Coincidence-corrected incorrect:         {corrected_incorrect:6.0f}  "
               f"({100*corrected_incorrect_rate:.2f}%)")
@@ -812,6 +864,12 @@ def main():
                          "1000 tracks on 720p), so coincidental nearby re-IDs "
                          "of unrelated tracks don't get counted as 'incorrect'. "
                          "Old default of 15 was too loose and overcounted FPs.")
+    ap.add_argument("--tolerance-growth", type=float, default=0.25,
+                    help="Extra scoring tolerance per frame of kill-to-"
+                         "resurrection gap (px/frame). The expected "
+                         "location is propagated with a translation-only "
+                         "motion model; parallax and rotation make its "
+                         "error grow with time.")
     ap.add_argument("--seed", type=int, default=0)
     # Hybrid config overrides (just the ones likely to want tuning)
     ap.add_argument("--target-tracks", type=int, default=1000)
@@ -863,7 +921,8 @@ def main():
         run_forced_fail(paths, front, args.output, clahe,
                         kill_fraction=args.kill_fraction,
                         seed=args.seed,
-                        spatial_tolerance_px=args.spatial_tolerance)
+                        spatial_tolerance_px=args.spatial_tolerance,
+                        tolerance_growth_px_per_frame=args.tolerance_growth)
 
 
 if __name__ == "__main__":
