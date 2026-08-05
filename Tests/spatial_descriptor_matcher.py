@@ -70,6 +70,17 @@ class PixelCandidate:
     x: float
     y: float
     descriptor: np.ndarray            # uint8 (32,)
+    # Optional per-candidate Hamming threshold. If <= 0, the matcher
+    # uses opts.hamming_threshold. Mirrors PixelQuery.radius. This
+    # supports gap-scaled re-ID acceptance (§4.6): a dormant candidate
+    # that died g frames ago has accumulated ~g frames of descriptor
+    # drift, so its acceptance ceiling should be
+    #     θ_eff(g) = min(θ_cap, θ_base + slope * g)
+    # computed by the caller, while a 1-frame-gap candidate keeps the
+    # strict base threshold.
+    # NOTE (C++ parity): SpatialDescriptorMatcher.h does not have this
+    # field yet; add it there before porting the frontend.
+    hamming_threshold: int = -1
 
 
 @dataclass
@@ -110,9 +121,15 @@ def spatial_descriptor_match(
     if Q == 0 or C == 0:
         return out
 
-    # Pre-stack candidate positions and descriptors for vectorized inner loop.
+    # Pre-stack candidate positions, descriptors, and per-candidate
+    # acceptance thresholds for the vectorized inner loop.
     cand_xy = np.array([[c.x, c.y] for c in candidates], dtype=np.float32)
     cand_desc = np.stack([c.descriptor for c in candidates], axis=0)  # (C, 32)
+    cand_thr = np.array(
+        [c.hamming_threshold if c.hamming_threshold > 0
+         else opts.hamming_threshold for c in candidates],
+        dtype=np.int32,
+    )
 
     for i, q in enumerate(queries):
         radius = q.radius if q.radius > 0.0 else opts.default_radius
@@ -125,22 +142,28 @@ def spatial_descriptor_match(
         # Hamming on the spatially-gated subset only.
         idxs = np.flatnonzero(spatial_mask)
         dists = hamming_distance_batch(q.descriptor, cand_desc[idxs])
-        best_local = int(np.argmin(dists))
-        best_dist = int(dists[best_local])
-        # Gate 1: Hamming threshold (inclusive).
-        if best_dist > opts.hamming_threshold:
+        # Gate 1: each candidate is judged against its OWN threshold
+        # (default when not overridden). Best = lowest Hamming among
+        # those that pass.
+        passing = dists <= cand_thr[idxs]
+        if not passing.any():
             continue
+        pass_local = np.flatnonzero(passing)
+        best_pass = int(pass_local[np.argmin(dists[pass_local])])
+        best_dist = int(dists[best_pass])
         # Gate 2: distinctiveness — the best must beat the second-best
         # spatially-gated candidate by the configured margin. The
         # second-best is taken over ALL spatial candidates (not only
-        # those under the threshold): a competitor just above the
+        # threshold-passing ones): a competitor just above its
         # threshold is still evidence of ambiguity.
         if opts.second_best_margin > 0 and len(dists) > 1:
-            second_best = int(np.partition(dists, 1)[1])
+            order = np.partition(dists, 1)
+            second_best = int(order[1]) if int(order[0]) == best_dist \
+                else int(order[0])
             if second_best - best_dist < opts.second_best_margin:
                 continue
         out[i] = Match(
-            candidate_index=int(idxs[best_local]),
+            candidate_index=int(idxs[best_pass]),
             hamming_distance=best_dist,
         )
 

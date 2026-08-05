@@ -322,6 +322,58 @@ class TestDormantBufferExtras:
         assert buf.query_within(0, 0, 1)[0].age_at_death == 42
 
 
+# ---------------- per-candidate Hamming threshold ----------------
+
+class TestPerCandidateThreshold:
+    def test_override_loosens_for_one_candidate(self):
+        # Default threshold 25 would reject a distance-30 candidate;
+        # its per-candidate override of 40 accepts it.
+        opts = MatchOptions(default_radius=50, hamming_threshold=25)
+        q = [PixelQuery(100, 100, desc(0))]
+        c = [PixelCandidate(101, 100, desc_with_bits(30),
+                            hamming_threshold=40)]
+        out = spatial_descriptor_match(q, c, opts)
+        assert out[0] is not None
+        assert out[0].hamming_distance == 30
+
+    def test_default_applies_when_not_overridden(self):
+        opts = MatchOptions(default_radius=50, hamming_threshold=25)
+        q = [PixelQuery(100, 100, desc(0))]
+        c = [PixelCandidate(101, 100, desc_with_bits(30))]  # thr -1 -> 25
+        assert spatial_descriptor_match(q, c, opts)[0] is None
+
+    def test_best_is_lowest_among_passing(self):
+        # Global-min candidate fails its own strict threshold; the next
+        # one passes its looser threshold and wins.
+        opts = MatchOptions(default_radius=50, hamming_threshold=256)
+        q = [PixelQuery(100, 100, desc(0))]
+        c = [
+            PixelCandidate(101, 100, desc_with_bits(20),
+                           hamming_threshold=10),   # dist 20 > own 10
+            PixelCandidate(102, 100, desc_with_bits(35),
+                           hamming_threshold=40),   # dist 35 <= own 40
+        ]
+        out = spatial_descriptor_match(q, c, opts)
+        assert out[0] is not None
+        assert out[0].candidate_index == 1
+        assert out[0].hamming_distance == 35
+
+    def test_rejected_better_candidate_still_triggers_margin(self):
+        # Same as above but with a margin: the rejected candidate has a
+        # LOWER distance than the accepted one, which is ambiguity
+        # evidence — the margin gate must refuse the match.
+        opts = MatchOptions(default_radius=50, hamming_threshold=256,
+                            second_best_margin=5)
+        q = [PixelQuery(100, 100, desc(0))]
+        c = [
+            PixelCandidate(101, 100, desc_with_bits(20),
+                           hamming_threshold=10),
+            PixelCandidate(102, 100, desc_with_bits(35),
+                           hamming_threshold=40),
+        ]
+        assert spatial_descriptor_match(q, c, opts)[0] is None
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))

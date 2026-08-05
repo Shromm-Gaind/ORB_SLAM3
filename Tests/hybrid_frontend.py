@@ -81,7 +81,16 @@ class HybridConfig:
     # Step 5 — Re-ID against dormant buffer
     dormant_horizon_frames: int = 30      # Δ_dormant
     reid_radius_px: float = 20.0          # r_reid
-    reid_hamming_threshold: int = 32      # θ_reid
+    # θ_reid BASE: acceptance ceiling for a 1-frame dormancy gap.
+    # Calibrate from the "same-track Hamming (1-frame gap)" diagnostic
+    # (p95 + margin). On the turbid coral footage that's ~32.
+    reid_hamming_threshold: int = 32
+    # Gap scaling: a candidate that died g frames ago is accepted up to
+    #   min(cap, base + slope * g)
+    # so short gaps stay strict (most matches; keeps hijacks near zero)
+    # while long gaps get the headroom their accumulated drift needs.
+    reid_hamming_slope_per_frame: float = 1.0
+    reid_hamming_cap: int = 55
     # Distinctiveness gate: best match must beat the second-best spatial
     # candidate by this many Hamming bits (0 disables). See
     # MatchOptions.second_best_margin.
@@ -200,6 +209,12 @@ class FrameResult:
     # "missed because no corner ever appeared there" from "missed
     # because the matcher rejected it".
     new_corner_positions: list[tuple[float, float]] = field(default_factory=list)
+    # Descriptors of those corners, aligned row-for-row with
+    # new_corner_positions. Lets the harness measure the true
+    # "stored dormant descriptor vs freshly-detected corner descriptor"
+    # distance — the exact comparison Step 5 performs — without
+    # recomputing anything.
+    new_corner_descriptors: Optional[np.ndarray] = None
 
 
 # --------------------------------------------------------------------
@@ -463,6 +478,7 @@ class HybridFrontend:
         same_track_hamming: list[int] = []
         same_track_gap1: list[int] = []
         new_corner_positions: list[tuple[float, float]] = []
+        new_corner_descriptors = None
         flow_dx, flow_dy = 0.0, 0.0
 
         # ============== Step 1: KLT track active features ==============
@@ -667,6 +683,7 @@ class HybridFrontend:
             new_corners_detected = len(kept_kps)
             new_corner_positions = [(float(kp.pt[0]), float(kp.pt[1]))
                                     for kp in kept_kps]
+            new_corner_descriptors = desc if len(kept_kps) else None
 
             # ============== Step 5: re-ID against dormant buffer ==========
             if kept_kps and not self.dormant_buffer.empty():
@@ -695,7 +712,23 @@ class HybridFrontend:
                 ]
                 all_dormant = list(self.dormant_buffer.all_entries())
                 candidates = [
-                    PixelCandidate(x=e.last_x, y=e.last_y, descriptor=e.descriptor)
+                    PixelCandidate(
+                        x=e.last_x, y=e.last_y, descriptor=e.descriptor,
+                        # Gap-scaled acceptance: descriptor drift grows
+                        # with the dormancy gap (measured: 1-frame drift
+                        # p90≈22 vs long-gap drift approaching the
+                        # birth-drift regime), so each candidate's
+                        # threshold covers ITS OWN gap instead of one
+                        # fixed number covering neither regime well.
+                        hamming_threshold=min(
+                            cfg.reid_hamming_cap,
+                            int(round(
+                                cfg.reid_hamming_threshold +
+                                cfg.reid_hamming_slope_per_frame *
+                                max(0, self.frame_index - e.frame_died)
+                            )),
+                        ),
+                    )
                     for e in all_dormant
                 ]
                 opts = MatchOptions(
@@ -784,6 +817,26 @@ class HybridFrontend:
             same_track_gap1_hamming_distances=same_track_gap1,
             median_flow=(flow_dx, flow_dy),
             new_corner_positions=new_corner_positions,
+            new_corner_descriptors=new_corner_descriptors,
+        )
+
+    def descriptors_at_current(
+            self, xy: list[tuple[float, float]]) -> dict[int, np.ndarray]:
+        """Compute steered-BRIEF descriptors at arbitrary positions on the
+        MOST RECENTLY PROCESSED frame.
+
+        Diagnostic hook for the forced-failure harness: it lets the
+        caller ask "what would the descriptor look like right here, right
+        now?" at a dormant track's predicted location, so descriptor
+        drift can be measured against the dormant entry's stored
+        descriptor for the population that actually matters (tracks that
+        DIED), rather than for KLT survivors.
+
+        Returns {input_index: descriptor}; positions whose patch falls
+        off the image border are absent.
+        """
+        return _descriptors_at_positions(
+            self._prev_gray, xy, self._orb, self.cfg.descriptor_patch_size,
         )
 
     def force_kill(self, track_ids: list[int]) -> list[tuple[int, float, float]]:
