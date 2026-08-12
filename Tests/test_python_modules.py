@@ -377,3 +377,39 @@ class TestPerCandidateThreshold:
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---------------- representative descriptor (medoid) ----------------
+
+from hybrid_frontend import _representative_descriptor  # noqa: E402
+
+
+class TestRepresentativeDescriptor:
+    def test_single_observation(self):
+        d = desc_with_bits(10)
+        assert np.array_equal(_representative_descriptor([d]), d)
+
+    def test_picks_central_not_outlier(self):
+        # Three near-identical observations plus one wildly corrupted
+        # one. The medoid must be one of the cluster, never the outlier.
+        cluster = [desc_with_bits(20), desc_with_bits(21), desc_with_bits(22)]
+        outlier = desc(0xFF)
+        rep = _representative_descriptor(cluster + [outlier])
+        assert not np.array_equal(rep, outlier)
+        assert any(np.array_equal(rep, c) for c in cluster)
+
+    def test_robust_to_two_outliers_via_median(self):
+        # The MEDIAN (not mean) criterion is what makes this robust:
+        # with 5 clustered and 2 corrupted observations, the medoid stays
+        # in the cluster even though the outliers inflate mean distance.
+        cluster = [desc_with_bits(30 + i) for i in range(5)]
+        outliers = [desc(0xFF), desc(0xF0)]
+        rep = _representative_descriptor(cluster + outliers)
+        assert any(np.array_equal(rep, c) for c in cluster)
+
+    def test_returns_an_actual_observation(self):
+        obs = [desc_with_bits(5), desc_with_bits(50), desc_with_bits(95)]
+        rep = _representative_descriptor(obs)
+        assert any(np.array_equal(rep, o) for o in obs), (
+            "medoid must be one of the inputs, not a synthesized descriptor"
+        )

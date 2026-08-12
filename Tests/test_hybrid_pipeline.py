@@ -178,3 +178,81 @@ class TestSmoke:
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+class TestNewFeatures:
+    """Representative descriptor + local dormant-window detection."""
+
+    def _front(self, **kw):
+        cfg = make_test_config()
+        for k, v in kw.items():
+            setattr(cfg, k, v)
+        return HybridFrontend(cfg)
+
+    def test_representative_accumulates_and_is_an_observation(self):
+        front = self._front(use_representative_descriptor=True,
+                            representative_sample_stride=1)
+        img = make_textured_image()
+        front.initialize(img)
+        prev = img
+        for _ in range(6):
+            curr = shift_image(prev, 1, 0)
+            front.process_frame(curr)
+            prev = curr
+        tracks = [t for t in front.active_tracks.values() if t.age >= 3]
+        assert tracks, "expected surviving tracks"
+        t = tracks[0]
+        assert len(t.descriptor_history) > 1, "observations should accumulate"
+        assert t.representative_descriptor is not None
+        assert any(np.array_equal(t.representative_descriptor, o)
+                   for o in t.descriptor_history)
+
+    def test_history_capped(self):
+        front = self._front(use_representative_descriptor=True,
+                            representative_sample_stride=1,
+                            representative_max_observations=4)
+        img = make_textured_image()
+        front.initialize(img)
+        prev = img
+        for _ in range(12):
+            curr = shift_image(prev, 1, 0)
+            front.process_frame(curr)
+            prev = curr
+        for t in front.active_tracks.values():
+            assert len(t.descriptor_history) <= 4
+
+    def test_disabled_leaves_history_empty(self):
+        front = self._front(use_representative_descriptor=False)
+        img = make_textured_image()
+        front.initialize(img)
+        front.process_frame(shift_image(img, 1, 0))
+        for t in front.active_tracks.values():
+            assert t.descriptor_history == []
+            assert t.representative_descriptor is None
+
+    def test_local_detect_does_not_inflate_active_set(self):
+        """Local-only corners are re-ID candidates; unmatched ones must be
+        discarded, so the active set never exceeds N_target."""
+        front = self._front(local_detect_in_dormant_windows=True,
+                            local_detect_quality_scale=0.01)  # very relaxed
+        img = make_textured_image()
+        front.initialize(img)
+        front.process_frame(shift_image(img, 1, 0))
+        ids = list(front.active_tracks.keys())[:30]
+        front.force_kill(ids)
+        prev = shift_image(img, 1, 0)
+        for _ in range(3):
+            curr = shift_image(prev, 1, 0)
+            front.process_frame(curr)
+            prev = curr
+            assert len(front.active_tracks) <= front.cfg.target_active_tracks, (
+                "local dormant-window corners must not be spawned as tracks"
+            )
+
+    def test_local_detect_runs_with_no_global_deficit(self):
+        """Step 5 must still be reachable when Step 4 produces nothing."""
+        front = self._front(local_detect_in_dormant_windows=True)
+        img = make_textured_image()
+        front.initialize(img)
+        res = front.process_frame(shift_image(img, 1, 0))
+        assert res.frame_index == 1

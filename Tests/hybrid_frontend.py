@@ -115,6 +115,45 @@ class HybridConfig:
     # detection reasons, not matching reasons).
     seed_corners_near_dormant: bool = True
 
+    # ---- Representative descriptor (ORB-SLAM3-style) ----
+    # Instead of storing one snapshot of the descriptor, accumulate
+    # observations along the track's life and store the one with the
+    # MINIMUM MEDIAN Hamming distance to all the others. That is
+    # ORB-SLAM3's MapPoint::ComputeDistinctiveDescriptors, and it is far
+    # more robust than any single observation: an unlucky snapshot (motion
+    # blur, a flicker in illumination, a bad orientation estimate) can sit
+    # tens of bits away from the landmark's typical appearance, whereas
+    # the medoid is by construction central to it. Cheap here because KLT
+    # already verifies a fresh observation every frame.
+    use_representative_descriptor: bool = True
+    # Observations are sampled every `stride` frames so the set spans the
+    # track's life rather than a burst of near-identical adjacent frames.
+    representative_max_observations: int = 8
+    representative_sample_stride: int = 3
+
+    # ---- Local detection inside dormant windows ----
+    # Step 4's global detector only has `deficit` corners to spend and
+    # spreads them over the whole image, so a killed landmark's spot
+    # often receives no candidate at all and Step 5 never gets to try
+    # (the "no corner ever detected there" bucket). This adds a targeted
+    # local search: within each dormant prediction window, take the best
+    # Shi-Tomasi response above a RELAXED threshold. Analogous to
+    # ORB-SLAM3's search-by-projection, which likewise looks where the
+    # map says a landmark should be instead of relying on global
+    # detection to find it.
+    #
+    # These corners are re-ID CANDIDATES ONLY: if a local corner fails to
+    # match a dormant track it is discarded, never spawned as a new
+    # track. So this cannot inflate the active set past N_target, and it
+    # is budget-independent of `deficit`.
+    local_detect_in_dormant_windows: bool = True
+    # Quality threshold for local corners, as a fraction of the global
+    # Shi-Tomasi threshold. < 1 means "accept weaker corners here,
+    # because we have strong positional evidence a landmark exists".
+    local_detect_quality_scale: float = 0.3
+    # Cap on windows searched per frame (bounds the dark-section cost).
+    local_detect_max_windows: int = 400
+
     # Tracking-lost threshold (§8 N_min)
     min_active_tracks: int = 50
 
@@ -143,6 +182,10 @@ class ActiveTrack:
     # be calibrated against, now that dormant entries store death-time
     # descriptors and dormancy gaps are 1-2 frames).
     diag_prev_descriptor: Optional[np.ndarray] = None
+    # Sampled descriptor observations over the track's life, and the
+    # medoid computed from them (see use_representative_descriptor).
+    descriptor_history: list = field(default_factory=list)
+    representative_descriptor: Optional[np.ndarray] = None
 
 
 # --------------------------------------------------------------------
@@ -356,6 +399,71 @@ def _stamp_squares(shape: tuple[int, int],
     return hit
 
 
+def _representative_descriptor(observations: list) -> np.ndarray:
+    """Return the medoid of a set of descriptors: the observation with
+    the minimum MEDIAN Hamming distance to all the others.
+
+    This is ORB-SLAM3's ComputeDistinctiveDescriptors. The median (not
+    the mean) is what makes it robust — a couple of badly corrupted
+    observations cannot drag the choice away from the landmark's typical
+    appearance. Returns the single observation when there is only one.
+    """
+    n = len(observations)
+    if n == 1:
+        return observations[0]
+    obs = np.stack(observations, axis=0)                    # (n, 32)
+    xor = np.bitwise_xor(obs[:, None, :], obs[None, :, :])  # (n, n, 32)
+    dists = np.unpackbits(xor, axis=2).sum(axis=2)          # (n, n)
+    medians = np.median(dists, axis=1)
+    return observations[int(np.argmin(medians))]
+
+
+def _local_corners_in_windows(
+        gray: np.ndarray, mask: np.ndarray, centers_xy: np.ndarray,
+        radius: float, block_size: int, quality: float,
+        quality_scale: float, max_windows: int,
+        min_separation: float, existing_xy: list,
+) -> list[tuple[float, float]]:
+    """Best Shi-Tomasi response inside each window, above a relaxed
+    threshold. One shared cornerMinEigenVal pass over the image, then an
+    argmax per window — far cheaper than a goodFeaturesToTrack call per
+    window, and equivalent for "give me the single best corner here".
+
+    Respects the occupancy mask (never returns a corner on top of a live
+    track) and enforces `min_separation` from corners already selected.
+    """
+    if centers_xy.size == 0:
+        return []
+    h, w = gray.shape
+    eig = cv2.cornerMinEigenVal(gray, block_size)
+    # Relaxed absolute threshold, mirroring goodFeaturesToTrack's
+    # qualityLevel * max(eig) convention.
+    thresh = float(eig.max()) * quality * quality_scale
+    r = max(1, int(round(radius)))
+    chosen: list[tuple[float, float]] = []
+    taken = list(existing_xy)
+    sep2 = min_separation * min_separation
+    for cx, cy in centers_xy[:max_windows]:
+        x0 = max(0, int(round(cx)) - r); x1 = min(w, int(round(cx)) + r + 1)
+        y0 = max(0, int(round(cy)) - r); y1 = min(h, int(round(cy)) + r + 1)
+        if x0 >= x1 or y0 >= y1:
+            continue
+        sub = eig[y0:y1, x0:x1]
+        sub_mask = mask[y0:y1, x0:x1]
+        cand = np.where(sub_mask > 0, sub, -1.0)
+        idx = int(np.argmax(cand))
+        val = float(cand.flat[idx])
+        if val < thresh:
+            continue
+        yy, xx = divmod(idx, cand.shape[1])
+        px, py = float(x0 + xx), float(y0 + yy)
+        if any((px - ex) ** 2 + (py - ey) ** 2 < sep2 for ex, ey in taken):
+            continue
+        chosen.append((px, py))
+        taken.append((px, py))
+    return chosen
+
+
 def _compute_steered_brief(
         gray: np.ndarray, kps: list[cv2.KeyPoint],
         orb: cv2.ORB, patch_size: int,
@@ -561,7 +669,8 @@ class HybridFrontend:
             # The histogram of these distances tells us what "Hamming for
             # the same physical feature" actually looks like on this
             # footage — i.e., a ground truth for the matcher's threshold.
-            if cfg.collect_diagnostics and kept_ids:
+            if (cfg.collect_diagnostics or cfg.use_representative_descriptor) \
+                    and kept_ids:
                 surv_tracks = [self.active_tracks[tid]
                                for i, tid in enumerate(surv_ids)
                                if inlier_mask[i]]
@@ -571,6 +680,24 @@ class HybridFrontend:
                 )
                 for src_idx, fresh in fresh_map.items():
                     t = surv_tracks[src_idx]
+                    # Accumulate a sampled observation and refresh the
+                    # medoid. Sampling by stride spreads the set over the
+                    # track's life instead of collecting a burst of
+                    # near-identical adjacent frames; the cap keeps the
+                    # pairwise medoid computation trivial.
+                    if cfg.use_representative_descriptor:
+                        if (t.age % max(1, cfg.representative_sample_stride)) == 0:
+                            t.descriptor_history.append(fresh.copy())
+                            if len(t.descriptor_history) > cfg.representative_max_observations:
+                                # Drop the OLDEST non-birth observation so
+                                # the set keeps spanning the track's life
+                                # (index 0 is the birth appearance, worth
+                                # retaining as one anchor).
+                                del t.descriptor_history[1]
+                            t.representative_descriptor = _representative_descriptor(
+                                t.descriptor_history)
+                    if not cfg.collect_diagnostics:
+                        continue
                     # (a) birth drift: how far the descriptor has walked
                     # since the track was born. Explains why storing the
                     # BIRTH descriptor in the dormant buffer was fatal.
@@ -621,7 +748,14 @@ class HybridFrontend:
                     # Fall back to the birth descriptor only when the
                     # death-time patch fell off the image border (those
                     # tracks are usually unrecoverable anyway).
+                    # Prefer the medoid over the death-time snapshot: a
+                    # single observation at the moment KLT failed is
+                    # exactly the observation most likely to be corrupted
+                    # (that is often WHY it failed).
                     stored = death_desc.get(k_i, t.birth_descriptor)
+                    if (cfg.use_representative_descriptor
+                            and t.representative_descriptor is not None):
+                        stored = t.representative_descriptor
                     # The last position is in previous-frame coordinates;
                     # apply this frame's flow so the entry is stored as a
                     # current-frame prediction like everything else.
@@ -686,7 +820,10 @@ class HybridFrontend:
             new_corner_descriptors = desc if len(kept_kps) else None
 
             # ============== Step 5: re-ID against dormant buffer ==========
-            if kept_kps and not self.dormant_buffer.empty():
+            # Local detection can create re-ID candidates even when the
+            # global detector produced none, so the gate is on the
+            # dormant buffer rather than on kept_kps.
+            if not self.dormant_buffer.empty():
                 # For each candidate, look up the dormant tracks within
                 # r_reid of its location. We could do this in two ways:
                 # (a) loop over candidates and call query_within per candidate
@@ -703,13 +840,58 @@ class HybridFrontend:
                 # That mapping makes the gates work correctly: the spatial
                 # gate is "candidate near query", which means "dormant track
                 # near new corner". Same thing, but cleaner this way.
-                queries = [
-                    PixelQuery(
-                        x=float(kp.pt[0]), y=float(kp.pt[1]),
-                        descriptor=desc[i],
+                # ---- Targeted local detection in dormant windows ----
+                # Positions/descriptors of the global Step 4 corners, then
+                # any extra corners found only inside dormant windows.
+                # `n_global` marks the boundary: queries at or beyond it
+                # are local-only and are DISCARDED if unmatched, so they
+                # can never inflate the active set.
+                q_xy = [(float(kp.pt[0]), float(kp.pt[1])) for kp in kept_kps]
+                q_desc = [desc[i] for i in range(len(kept_kps))]
+                n_global = len(q_xy)
+
+                if cfg.local_detect_in_dormant_windows:
+                    dorm_all = list(self.dormant_buffer.all_entries())
+                    dorm_pos = np.array([[e.last_x, e.last_y] for e in dorm_all],
+                                        dtype=np.float32)
+                    local_mask = _build_occupancy_mask(
+                        curr_gray.shape, self.active_tracks,
+                        cfg.occupancy_mask_radius,
                     )
-                    for i, kp in enumerate(kept_kps)
+                    local_xy = _local_corners_in_windows(
+                        curr_gray, local_mask, dorm_pos,
+                        radius=cfg.reid_radius_px,
+                        block_size=cfg.shi_tomasi_block_size,
+                        quality=cfg.shi_tomasi_quality,
+                        quality_scale=cfg.local_detect_quality_scale,
+                        max_windows=cfg.local_detect_max_windows,
+                        min_separation=float(cfg.shi_tomasi_min_distance),
+                        existing_xy=q_xy,
+                    )
+                    if local_xy:
+                        l_kps = [cv2.KeyPoint(x=x, y=y,
+                                              size=float(cfg.descriptor_patch_size))
+                                 for x, y in local_xy]
+                        l_kept, l_desc = _compute_steered_brief(
+                            curr_gray, l_kps, self._orb,
+                            cfg.descriptor_patch_size,
+                        )
+                        for j, kp in enumerate(l_kept):
+                            q_xy.append((float(kp.pt[0]), float(kp.pt[1])))
+                            q_desc.append(l_desc[j])
+
+                queries = [
+                    PixelQuery(x=x, y=y, descriptor=q_desc[i])
+                    for i, (x, y) in enumerate(q_xy)
                 ]
+                # Report ALL Step 5 candidates (global + local) so the
+                # positions and descriptors handed to the harness stay
+                # aligned and its "was a corner available here?"
+                # diagnostic reflects what the matcher actually saw.
+                new_corner_positions = list(q_xy)
+                new_corner_descriptors = (
+                    np.stack(q_desc, axis=0) if q_desc else None
+                )
                 all_dormant = list(self.dormant_buffer.all_entries())
                 candidates = [
                     PixelCandidate(
@@ -759,36 +941,56 @@ class HybridFrontend:
 
                 # Apply matches: candidates with a match resurrect the
                 # dormant track ID; others get a fresh ID.
+                # Apply matches under a strict budget: total additions
+                # to the active set this frame (resurrections + fresh
+                # spawns) may not exceed `deficit`, so N_target is
+                # honoured exactly. Resurrections are applied FIRST
+                # because recovering a landmark's identity is worth more
+                # than adding an anonymous new corner — a fresh corner
+                # can be spawned next frame, whereas a dormant entry
+                # expires and its identity is lost for good.
                 used_dormant_ids: set[int] = set()
+                budget = deficit
+
                 for i, m in enumerate(matches):
-                    kp = kept_kps[i]
-                    if m is not None:
-                        dormant = all_dormant[m.candidate_index]
-                        assert dormant.id not in used_dormant_ids, (
-                            "unique_candidates should have prevented this"
+                    if m is None or budget <= 0:
+                        continue
+                    dormant = all_dormant[m.candidate_index]
+                    assert dormant.id not in used_dormant_ids, (
+                        "unique_candidates should have prevented this"
+                    )
+                    used_dormant_ids.add(dormant.id)
+                    if cfg.collect_diagnostics:
+                        accepted_hamming.append(m.hamming_distance)
+                        resurrected_ages.append(
+                            self.frame_index - dormant.frame_died
                         )
-                        used_dormant_ids.add(dormant.id)
-                        # ---- Diagnostic: per-match Hamming + age ----
-                        if cfg.collect_diagnostics:
-                            accepted_hamming.append(m.hamming_distance)
-                            resurrected_ages.append(
-                                self.frame_index - dormant.frame_died
-                            )
-                        # Reuse the original ID. The new descriptor is the
-                        # current corner's descriptor (a fresh birth
-                        # descriptor for the resurrected infant — per the
-                        # design doc the dormant track's stored descriptor
-                        # was its single-shot birth one and we now have a
-                        # newer observation, so use that).
-                        self._spawn_track(
-                            kp.pt[0], kp.pt[1], desc[i], octave=0,
-                            id=dormant.id, age=dormant.age_at_death,
-                        )
-                        self.dormant_buffer.remove(dormant.id)
-                        resurrected_ids.append(dormant.id)
-                        reids_succeeded += 1
-                    else:
-                        self._spawn_track(kp.pt[0], kp.pt[1], desc[i], octave=0)
+                    qx, qy = q_xy[i]
+                    # The resurrected track is seeded with BOTH the fresh
+                    # observation and the dormant entry's representative
+                    # descriptor, so the landmark keeps its accumulated
+                    # appearance evidence across the gap.
+                    self._spawn_track(
+                        qx, qy, q_desc[i], octave=0,
+                        id=dormant.id, age=dormant.age_at_death,
+                        seed_history=[dormant.descriptor],
+                    )
+                    self.dormant_buffer.remove(dormant.id)
+                    resurrected_ids.append(dormant.id)
+                    reids_succeeded += 1
+                    budget -= 1
+
+                for i, m in enumerate(matches):
+                    # Unmatched GLOBAL corners become new tracks. Unmatched
+                    # LOCAL-only corners are discarded: they were detected
+                    # purely as re-ID evidence under a relaxed threshold
+                    # and outside the deficit budget, so promoting them
+                    # would pollute the map with weak corners.
+                    if m is not None or i >= n_global or budget <= 0:
+                        continue
+                    qx, qy = q_xy[i]
+                    self._spawn_track(qx, qy, q_desc[i], octave=0)
+                    budget -= 1
             else:
                 # Either no candidates or empty dormant buffer: every new
                 # corner gets a fresh ID.
@@ -866,6 +1068,9 @@ class HybridFrontend:
             self.active_tracks.pop(tid)
             killed.append((tid, t.x, t.y))
             stored = death_desc.get(k_i, t.birth_descriptor)
+            if (self.cfg.use_representative_descriptor
+                    and t.representative_descriptor is not None):
+                stored = t.representative_descriptor
             self.dormant_buffer.add(DormantTrack(
                 id=tid, last_x=t.x, last_y=t.y,
                 descriptor=np.asarray(stored, dtype=np.uint8).copy(),
@@ -878,7 +1083,7 @@ class HybridFrontend:
 
     def _spawn_track(self, x: float, y: float, descriptor: np.ndarray,
                      octave: int = 0, id: Optional[int] = None,
-                     age: int = 0) -> int:
+                     age: int = 0, seed_history: Optional[list] = None) -> int:
         """Create an active track and return its id.
 
         `age` is nonzero only for resurrections, where the dormant
@@ -893,9 +1098,21 @@ class HybridFrontend:
             # future fresh ids. Bump _next_id past it.
             self._next_id = max(self._next_id, id + 1)
         assert id not in self.active_tracks, f"Duplicate active track id {id}"
-        self.active_tracks[id] = ActiveTrack(
+        d0 = descriptor.astype(np.uint8).copy()
+        t = ActiveTrack(
             id=id, x=float(x), y=float(y),
-            birth_descriptor=descriptor.astype(np.uint8).copy(),
-            octave=octave, age=age,
+            birth_descriptor=d0, octave=octave, age=age,
         )
+        if self.cfg.use_representative_descriptor:
+            # Seed the observation set. On a resurrection, `seed_history`
+            # carries the dormant entry's representative across the gap so
+            # the landmark's accumulated appearance evidence is not thrown
+            # away and rebuilt from one fresh corner.
+            t.descriptor_history = [d0]
+            if seed_history:
+                for d in seed_history:
+                    t.descriptor_history.append(np.asarray(d, np.uint8).copy())
+            t.representative_descriptor = _representative_descriptor(
+                t.descriptor_history)
+        self.active_tracks[id] = t
         return id

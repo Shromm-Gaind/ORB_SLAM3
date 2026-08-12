@@ -1189,7 +1189,7 @@ def plot_forced_fail_summary(events, path: Path,
 
 
 # --------------------------------------------------------------------
-# Entry point7
+# Entry point
 # --------------------------------------------------------------------
 
 def main():
@@ -1254,6 +1254,23 @@ def main():
                          "buffered for re-ID (noise suppression). The "
                          "forced-fail kill sample is filtered to tracks at "
                          "least this old.")
+    ap.add_argument("--no-representative-descriptor", action="store_true",
+                    help="Store the death-time descriptor snapshot instead "
+                         "of the medoid of the track's observations "
+                         "(ablation).")
+    ap.add_argument("--representative-observations", type=int, default=8,
+                    help="Max descriptor observations kept per track for "
+                         "the medoid.")
+    ap.add_argument("--representative-stride", type=int, default=3,
+                    help="Sample one observation every N frames of track "
+                         "age, so the set spans the track's life.")
+    ap.add_argument("--no-local-detect", action="store_true",
+                    help="Disable targeted Shi-Tomasi search inside "
+                         "dormant windows (ablation).")
+    ap.add_argument("--local-detect-quality", type=float, default=0.3,
+                    help="Local corner quality as a fraction of the "
+                         "global Shi-Tomasi threshold. Lower = accept "
+                         "weaker corners where a landmark is predicted.")
     ap.add_argument("--no-motion-comp", action="store_true",
                     help="Disable motion compensation of dormant "
                          "predicted positions.")
@@ -1276,6 +1293,11 @@ def main():
         reid_second_best_margin=args.reid_margin,
         dormant_horizon_frames=args.dormant_horizon,
         dormant_min_track_age=args.min_track_age,
+        use_representative_descriptor=not args.no_representative_descriptor,
+        representative_max_observations=args.representative_observations,
+        representative_sample_stride=args.representative_stride,
+        local_detect_in_dormant_windows=not args.no_local_detect,
+        local_detect_quality_scale=args.local_detect_quality,
         motion_compensate_dormant=not args.no_motion_comp,
         seed_corners_near_dormant=not args.no_dormant_seeding,
     )
