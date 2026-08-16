@@ -1192,12 +1192,145 @@ def plot_forced_fail_summary(events, path: Path,
 # Entry point
 # --------------------------------------------------------------------
 
+def run_lifetime_ablation(paths, cfg_template, output: Path,
+                          clahe, max_frames=None):
+    """Track-lifetime ablation: re-ID ON vs OFF over the same frames.
+
+    Re-ID recall is an internal metric. What the BACKEND consumes is
+    track identity: a landmark observed under one ID for 40 frames gives
+    bundle adjustment a 40-observation constraint, whereas the same
+    landmark fragmented into four 10-frame IDs gives four weak ones and
+    four duplicate map points. This measures that directly.
+
+    Lifetime is measured as SPAN (last frame seen - first frame seen + 1)
+    rather than consecutive observations, because bridging a gap is
+    exactly what re-ID is for — an ID that disappears for two frames and
+    returns is one landmark, not two.
+    """
+    import copy
+
+    output.mkdir(parents=True, exist_ok=True)
+    results = {}
+    for label, enable in (("re-ID ON", True), ("re-ID OFF", False)):
+        cfg = copy.deepcopy(cfg_template)
+        cfg.enable_reid = enable
+        cfg.collect_diagnostics = False
+        front = HybridFrontend(cfg)
+
+        first_seen: dict[int, int] = {}
+        last_seen: dict[int, int] = {}
+        n_obs: dict[int, int] = {}
+
+        img0 = read_gray(paths[0], clahe)
+        front.initialize(img0)
+        for tid in front.active_tracks:
+            first_seen[tid] = 0
+            last_seen[tid] = 0
+            n_obs[tid] = 1
+
+        n = len(paths) if max_frames is None else min(len(paths), max_frames)
+        for idx in range(1, n):
+            front.process_frame(read_gray(paths[idx], clahe))
+            for tid in front.active_tracks:
+                if tid not in first_seen:
+                    first_seen[tid] = idx
+                last_seen[tid] = idx
+                n_obs[tid] = n_obs.get(tid, 0) + 1
+            if idx % 250 == 0:
+                print(f"    [{label}] frame {idx}/{n-1}  "
+                      f"ids so far={len(first_seen)}")
+
+        spans = np.array([last_seen[t] - first_seen[t] + 1
+                          for t in first_seen], dtype=float)
+        obs = np.array([n_obs[t] for t in first_seen], dtype=float)
+        results[label] = {
+            "n_ids": len(first_seen), "spans": spans, "observations": obs,
+            "frames": n,
+        }
+
+    print()
+    print("=" * 70)
+    print("TRACK LIFETIME ABLATION — what re-ID buys the backend")
+    print("=" * 70)
+    on, off = results["re-ID ON"], results["re-ID OFF"]
+    print(f"\n  Frames processed: {on['frames']}")
+    print(f"\n  {'metric':<38s} {'re-ID ON':>12s} {'re-ID OFF':>12s} "
+          f"{'change':>10s}")
+
+    def _row(name, a, b, fmt="{:.1f}", invert=False):
+        if b == 0:
+            chg = "n/a"
+        else:
+            pct = 100.0 * (a - b) / abs(b)
+            chg = f"{pct:+.1f}%"
+        print(f"  {name:<38s} {fmt.format(a):>12s} {fmt.format(b):>12s} "
+              f"{chg:>10s}")
+
+    # Fewer distinct IDs for the same footage = less fragmentation.
+    _row("distinct track IDs created", on["n_ids"], off["n_ids"], "{:.0f}")
+    _row("median span (frames)", float(np.median(on["spans"])),
+         float(np.median(off["spans"])))
+    _row("mean span (frames)", float(on["spans"].mean()),
+         float(off["spans"].mean()))
+    _row("p90 span (frames)", float(np.percentile(on["spans"], 90)),
+         float(np.percentile(off["spans"], 90)))
+    _row("mean observations per ID", float(on["observations"].mean()),
+         float(off["observations"].mean()))
+    for k in (10, 20, 30, 60):
+        _row(f"fraction of IDs surviving >= {k} frames",
+             float((on["spans"] >= k).mean()),
+             float((off["spans"] >= k).mean()), "{:.3f}")
+
+    print()
+    print("  Interpretation: FEWER ids and LONGER spans for the same")
+    print("  footage means the same physical landmarks are being held")
+    print("  under one identity instead of being re-created as new ones.")
+    print("  The 'surviving >= 20/30 frames' rows are the ones that matter")
+    print("  for keyframe-to-keyframe correspondence.")
+
+    with open(output / "track_lifetimes.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["config", "span_frames", "observations"])
+        for label, r in results.items():
+            for s, o in zip(r["spans"], r["observations"]):
+                w.writerow([label, int(s), int(o)])
+    print(f"\n  Saved: {output/'track_lifetimes.csv'}")
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    bins = np.logspace(0, np.log10(max(2, on["spans"].max())), 40)
+    for label, color in (("re-ID ON", "#2ca02c"), ("re-ID OFF", "#d62728")):
+        ax1.hist(results[label]["spans"], bins=bins, alpha=0.55,
+                 label=label, color=color)
+    ax1.set_xscale("log"); ax1.set_yscale("log")
+    ax1.set_xlabel("track span (frames)"); ax1.set_ylabel("# track IDs")
+    ax1.set_title("Track lifetime distribution")
+    ax1.legend(); ax1.grid(alpha=0.3)
+
+    ks = np.arange(1, int(max(on["spans"].max(), off["spans"].max())) + 1)
+    for label, color in (("re-ID ON", "#2ca02c"), ("re-ID OFF", "#d62728")):
+        s = results[label]["spans"]
+        ax2.plot(ks, [(s >= k).mean() for k in ks], color=color, label=label)
+    ax2.set_xscale("log")
+    ax2.set_xlabel("span threshold k (frames)")
+    ax2.set_ylabel("fraction of IDs surviving >= k")
+    ax2.set_title("Survival curve")
+    ax2.legend(); ax2.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output / "track_lifetimes.png", dpi=110)
+    plt.close(fig)
+    print(f"  Saved: {output/'track_lifetimes.png'}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("folder", type=Path)
     ap.add_argument("--output", type=Path, default=Path("./poc_results"))
-    ap.add_argument("--mode", choices=["normal", "forced-fail"], default="normal")
+    ap.add_argument("--mode",
+                    choices=["normal", "forced-fail", "lifetime"],
+                    default="normal",
+                    help="lifetime: run the same footage twice (re-ID on "
+                         "and off) and compare track fragmentation.")
     ap.add_argument("--max-frames", type=int, default=None)
     ap.add_argument("--clahe", action="store_true",
                     help="Apply CLAHE preprocessing (helps with turbid water)")
@@ -1306,6 +1439,9 @@ def main():
     if args.mode == "normal":
         run_normal(paths, front, args.output, clahe, args.fps,
                    write_video=not args.no_video)
+    elif args.mode == "lifetime":
+        run_lifetime_ablation(paths, cfg, args.output, clahe,
+                              max_frames=args.max_frames)
     else:
         run_forced_fail(paths, front, args.output, clahe,
                         kill_fraction=args.kill_fraction,

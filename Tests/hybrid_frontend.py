@@ -115,6 +115,12 @@ class HybridConfig:
     # detection reasons, not matching reasons).
     seed_corners_near_dormant: bool = True
 
+    # Master switch for Step 5. When False the dormant buffer is still
+    # maintained but never queried, so every new corner receives a fresh
+    # ID. This is the ablation that answers "what does re-ID actually buy
+    # the backend?" — measured as track fragmentation, not re-ID recall.
+    enable_reid: bool = True
+
     # ---- Representative descriptor (ORB-SLAM3-style) ----
     # Instead of storing one snapshot of the descriptor, accumulate
     # observations along the track's life and store the one with the
@@ -823,7 +829,7 @@ class HybridFrontend:
             # Local detection can create re-ID candidates even when the
             # global detector produced none, so the gate is on the
             # dormant buffer rather than on kept_kps.
-            if not self.dormant_buffer.empty():
+            if cfg.enable_reid and not self.dormant_buffer.empty():
                 # For each candidate, look up the dormant tracks within
                 # r_reid of its location. We could do this in two ways:
                 # (a) loop over candidates and call query_within per candidate
