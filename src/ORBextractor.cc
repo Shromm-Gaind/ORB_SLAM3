@@ -58,6 +58,7 @@
 #include <opencv2/imgproc/imgproc.hpp>
 #include <vector>
 #include <iostream>
+#include <algorithm>   // HYBRID FRONTEND: std::nth_element / std::max
 
 #include "ORBextractor.h"
 
@@ -71,6 +72,31 @@ namespace ORB_SLAM3
     const int PATCH_SIZE = 31;
     const int HALF_PATCH_SIZE = 15;
     const int EDGE_THRESHOLD = 19;
+
+    // ---- HYBRID FRONTEND: Shi-Tomasi detection constants (§4.5.2) ----
+    // Structure-tensor summation window. Matches the Python reference
+    // (multiscale_shitomasi.py, DEFAULT_BLOCK_SIZE = 7).
+    const int ST_BLOCK_SIZE = 7;
+    // Sobel aperture for the gradients feeding the structure tensor
+    // (OpenCV default, and what cv2.cornerMinEigenVal used in the
+    // Python validation).
+    const int ST_SOBEL_KSIZE = 3;
+    // Non-maximum-suppression radius in pixels: a candidate must equal
+    // the max response in a (2r+1)x(2r+1) window (Python nms_radius=3).
+    const int ST_NMS_RADIUS = 3;
+    // Noise floor relative to the level's own max lambda2. Selection is
+    // done by rank, so this floor only culls flat-region numerical
+    // noise; §12.4: "the absolute value of theta_ST is therefore almost
+    // irrelevant". Matches the Python 'rank' rule floor:
+    // 0.01 * quality(0.01) * lam_max = 1e-4 * lam_max.
+    const float ST_NOISE_FLOOR_REL = 1e-4f;
+    // Real-time guard: cap the candidates handed to the quadtree at
+    // this multiple of the level's feature target, keeping the highest
+    // lambda2 responses. §12.4 measured rank selection feeding the
+    // quadtree 2.8-4.4x more candidates than threshold rules; 20x the
+    // target preserves that richness with bounded cost. Set <= 0 to
+    // disable the cap and reproduce the Python reference exactly.
+    const int ST_MAX_CANDIDATES_PER_TARGET = 20;
 
 
     static float IC_Angle(const Mat& image, Point2f pt,  const vector<int> & u_max)
@@ -407,9 +433,9 @@ namespace ORB_SLAM3
             };
 
     ORBextractor::ORBextractor(int _nfeatures, float _scaleFactor, int _nlevels,
-                               int _iniThFAST, int _minThFAST):
+                               int _iniThFAST, int _minThFAST, bool _useShiTomasi):
             nfeatures(_nfeatures), scaleFactor(_scaleFactor), nlevels(_nlevels),
-            iniThFAST(_iniThFAST), minThFAST(_minThFAST)
+            iniThFAST(_iniThFAST), minThFAST(_minThFAST), bUseShiTomasi(_useShiTomasi)
     {
         mvScaleFactor.resize(nlevels);
         mvLevelSigma2.resize(nlevels);
@@ -465,6 +491,32 @@ namespace ORB_SLAM3
                 ++v0;
             umax[v] = v0;
             ++v0;
+        }
+
+        // HYBRID FRONTEND: announce the active detector unconditionally.
+        // This is the authoritative statement of what is running — it is
+        // printed by the extractor itself, so it cannot disagree with
+        // actual behaviour no matter how the config was plumbed.
+        std::cout << "[ORBextractor] detector = "
+                  << (bUseShiTomasi ? "SHI-TOMASI (hybrid frontend)"
+                                    : "FAST (stock ORB-SLAM3)")
+                  << "  |  nFeatures=" << nfeatures
+                  << " scaleFactor=" << scaleFactor
+                  << " nLevels=" << nlevels << std::endl;
+        if(bUseShiTomasi)
+        {
+            std::cout << "               lambda2 blockSize=" << ST_BLOCK_SIZE
+                      << " sobel=" << ST_SOBEL_KSIZE
+                      << " nmsRadius=" << ST_NMS_RADIUS
+                      << " selection=rank(quadtree on lambda2)" << std::endl;
+            std::cout << "               NOTE: ORBextractor.iniThFAST ("
+                      << iniThFAST << ") and minThFAST (" << minThFAST
+                      << ") are IGNORED by this detector." << std::endl;
+        }
+        else
+        {
+            std::cout << "               iniThFAST=" << iniThFAST
+                      << " minThFAST=" << minThFAST << std::endl;
         }
     }
 
@@ -895,6 +947,141 @@ namespace ORB_SLAM3
             computeOrientation(mvImagePyramid[level], allKeypoints[level], umax);
     }
 
+    // -----------------------------------------------------------------
+    // HYBRID FRONTEND: multi-scale Shi-Tomasi detection (design doc
+    // §4.5.2, validated in §12.4). Replaces the FAST + two-threshold
+    // cell sweep of ComputeKeyPointsOctTree with the lambda2 response
+    // (minimum eigenvalue of the structure tensor — the quantity that
+    // governs KLT convergence, §3.1), selected by the per-level
+    // geometric target + quadtree ranked on lambda2 ("rank" rule).
+    //
+    // Deliberately NOT an adaptive per-level threshold: §12.4 measured
+    // lambda2 RISING with pyramid level on the target footage (p99 at
+    // level 7 is 2.44x level 0) and a median response of ~0 at every
+    // level (heavy-tailed distribution), so both an absolute threshold
+    // and a max-normalised threshold misbehave. Rank selection is
+    // insensitive to the absolute response scale in either direction.
+    //
+    // The detection ROI, ROI-relative coordinate convention handed to
+    // DistributeOctTree, border restore, octave/size stamping and
+    // orientation pass are kept byte-for-byte equivalent to the FAST
+    // path so every downstream consumer (BRIEF at kp.octave, r_TLM(l),
+    // invLevelSigma2 BA weighting, stereo lapping split) is untouched.
+    // -----------------------------------------------------------------
+
+
+    void ORBextractor::ComputeKeyPointsShiTomasi(vector<vector<KeyPoint> >& allKeypoints)
+    {
+        allKeypoints.resize(nlevels);
+
+        for (int level = 0; level < nlevels; ++level)
+        {
+            // Identical detection ROI to the FAST path.
+            const int minBorderX = EDGE_THRESHOLD-3;
+            const int minBorderY = minBorderX;
+            const int maxBorderX = mvImagePyramid[level].cols-EDGE_THRESHOLD+3;
+            const int maxBorderY = mvImagePyramid[level].rows-EDGE_THRESHOLD+3;
+
+            const int roiW = maxBorderX - minBorderX;
+            const int roiH = maxBorderY - minBorderY;
+            if (roiW < 2*ST_NMS_RADIUS+1 || roiH < 2*ST_NMS_RADIUS+1)
+                continue;
+
+            // lambda2 at every pixel of the level image. This IS the
+            // Shi-Tomasi "Good Features to Track" response. Note that
+            // mvImagePyramid[level] is a view into a padded parent Mat
+            // (ComputePyramid adds a 19 px reflected border), so the
+            // filters read real border pixels instead of synthesizing
+            // them.
+            cv::Mat lambda2;
+            cv::cornerMinEigenVal(mvImagePyramid[level], lambda2,
+                                  ST_BLOCK_SIZE, ST_SOBEL_KSIZE);
+
+            // Noise floor from the ROI's own max response.
+            const cv::Rect roi(minBorderX, minBorderY, roiW, roiH);
+            double lamMax = 0.0;
+            cv::minMaxLoc(lambda2(roi), 0, &lamMax);
+            const float thr = ST_NOISE_FLOOR_REL * static_cast<float>(lamMax);
+
+            // Grey dilation for NMS: a pixel is a candidate iff it
+            // equals the local max. Plateau ties yield adjacent
+            // candidates, which the quadtree then resolves spatially —
+            // same behaviour as the Python reference.
+            cv::Mat localMax;
+            const int k = 2*ST_NMS_RADIUS + 1;
+            cv::dilate(lambda2, localMax, cv::Mat::ones(k, k, CV_8U));
+
+            vector<cv::KeyPoint> vToDistributeKeys;
+            vToDistributeKeys.reserve(nfeatures*10);
+
+            for (int y = minBorderY; y < maxBorderY; ++y)
+            {
+                const float* lam = lambda2.ptr<float>(y);
+                const float* dil = localMax.ptr<float>(y);
+                for (int x = minBorderX; x < maxBorderX; ++x)
+                {
+                    const float v = lam[x];
+                    if (v > thr && v >= dil[x])
+                    {
+                        // ROI-relative coordinates, exactly as the FAST
+                        // path hands them to DistributeOctTree.
+                        // response = lambda2, so the quadtree's
+                        // max-response-per-leaf retention implements
+                        // rank selection on lambda2 (§4.5.2).
+                        vToDistributeKeys.push_back(
+                            cv::KeyPoint(static_cast<float>(x - minBorderX),
+                                         static_cast<float>(y - minBorderY),
+                                         7.f, -1.f, v));
+                    }
+                }
+            }
+
+            if (ST_MAX_CANDIDATES_PER_TARGET > 0)
+            {
+                const size_t cap =
+                    static_cast<size_t>(ST_MAX_CANDIDATES_PER_TARGET) *
+                    static_cast<size_t>(std::max(1, mnFeaturesPerLevel[level]));
+                if (vToDistributeKeys.size() > cap)
+                {
+                    std::nth_element(
+                        vToDistributeKeys.begin(),
+                        vToDistributeKeys.begin() + cap,
+                        vToDistributeKeys.end(),
+                        [](const cv::KeyPoint& a, const cv::KeyPoint& b)
+                        { return a.response > b.response; });
+                    vToDistributeKeys.resize(cap);
+                }
+            }
+
+            vector<KeyPoint> & keypoints = allKeypoints[level];
+            keypoints.reserve(nfeatures);
+
+            keypoints = DistributeOctTree(vToDistributeKeys, minBorderX, maxBorderX,
+                                          minBorderY, maxBorderY, mnFeaturesPerLevel[level], level);
+
+            const int scaledPatchSize = PATCH_SIZE*mvScaleFactor[level];
+
+            // Restore ROI offset, stamp octave and level-scaled patch
+            // size (§4.5.2: size = 31 * 1.2^l) exactly as the FAST path
+            // does, so BRIEF is computed at the detected scale and
+            // r_TLM(l) / invLevelSigma2 behave as stock expects.
+            const int nkps = keypoints.size();
+            for(int i=0; i<nkps ; i++)
+            {
+                keypoints[i].pt.x+=minBorderX;
+                keypoints[i].pt.y+=minBorderY;
+                keypoints[i].octave=level;
+                keypoints[i].size = scaledPatchSize;
+            }
+        }
+
+        // Orientation via intensity centroid — unchanged (§4.5.4).
+        // Steered BRIEF downstream is untouched (§3.2), so descriptors
+        // stay bit-compatible with stock ORB-SLAM3 and DBoW2.
+        for (int level = 0; level < nlevels; ++level)
+            computeOrientation(mvImagePyramid[level], allKeypoints[level], umax);
+    }
+
     void ORBextractor::ComputeKeyPointsOld(std::vector<std::vector<KeyPoint> > &allKeypoints)
     {
         allKeypoints.resize(nlevels);
@@ -1097,7 +1284,12 @@ namespace ORB_SLAM3
         ComputePyramid(image);
 
         vector < vector<KeyPoint> > allKeypoints;
-        ComputeKeyPointsOctTree(allKeypoints);
+        // HYBRID FRONTEND: Shi-Tomasi by default; stock FAST retained
+        // behind the flag for A/B comparison (§9.2 step 3).
+        if(bUseShiTomasi)
+            ComputeKeyPointsShiTomasi(allKeypoints);
+        else
+            ComputeKeyPointsOctTree(allKeypoints);
         //ComputeKeyPointsOld(allKeypoints);
 
         Mat descriptors;

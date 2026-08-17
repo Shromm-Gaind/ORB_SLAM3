@@ -592,13 +592,17 @@ void Tracking::newParameterLoader(Settings *settings) {
     int fMinThFAST = settings->minThFAST();
     float fScaleFactor = settings->scaleFactor();
 
-    mpORBextractorLeft = new ORBextractor(nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
+    const bool bUseShiTomasi = settings->useShiTomasi();   // HYBRID FRONTEND
+
+    mpORBextractorLeft = new ORBextractor(nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST,bUseShiTomasi);
 
     if(mSensor==System::STEREO || mSensor==System::IMU_STEREO)
-        mpORBextractorRight = new ORBextractor(nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
+        mpORBextractorRight = new ORBextractor(nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST,bUseShiTomasi);
 
     if(mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR)
-        mpIniORBextractor = new ORBextractor(5*nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
+        mpIniORBextractor = new ORBextractor(5*nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST,bUseShiTomasi);
+
+    std::cout << "- Detector: " << (bUseShiTomasi ? "Shi-Tomasi (hybrid frontend)" : "FAST (stock)") << std::endl;
 
     //IMU parameters
     Sophus::SE3f Tbc = settings->Tbc();
@@ -1280,13 +1284,22 @@ bool Tracking::ParseORBParamFile(cv::FileStorage &fSettings)
         return false;
     }
 
-    mpORBextractorLeft = new ORBextractor(nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
+    // HYBRID FRONTEND: optional detector switch (absent => Shi-Tomasi).
+    bool bUseShiTomasi = true;
+    node = fSettings["ORBextractor.useShiTomasi"];
+    if(!node.empty() && node.isInt())
+        bUseShiTomasi = (node.operator int()) != 0;
+
+    mpORBextractorLeft = new ORBextractor(nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST,bUseShiTomasi);
 
     if(mSensor==System::STEREO || mSensor==System::IMU_STEREO)
-        mpORBextractorRight = new ORBextractor(nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
+        mpORBextractorRight = new ORBextractor(nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST,bUseShiTomasi);
 
     if(mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR)
-        mpIniORBextractor = new ORBextractor(5*nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
+        mpIniORBextractor = new ORBextractor(5*nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST,bUseShiTomasi);
+
+    cout << endl << "ORB Extractor Parameters: " << endl;
+    cout << "- Detector: " << (bUseShiTomasi ? "Shi-Tomasi (hybrid frontend)" : "FAST (stock)") << endl;
 
     cout << endl << "ORB Extractor Parameters: " << endl;
     cout << "- Number of Features: " << nFeatures << endl;

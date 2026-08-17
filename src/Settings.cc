@@ -448,6 +448,13 @@ namespace ORB_SLAM3 {
         nLevels_ = readParameter<int>(fSettings,"ORBextractor.nLevels",found);
         initThFAST_ = readParameter<int>(fSettings,"ORBextractor.iniThFAST",found);
         minThFAST_ = readParameter<int>(fSettings,"ORBextractor.minThFAST",found);
+
+        // HYBRID FRONTEND: optional detector switch. Absent => Shi-Tomasi
+        // (design doc §9.1). readParameter with required=false prints a
+        // notice to cerr when the key is missing, which is the intended
+        // signal that you are on the default.
+        int useST = readParameter<int>(fSettings,"ORBextractor.useShiTomasi",found,false);
+        useShiTomasi_ = found ? (useST != 0) : true;
     }
 
     void Settings::readViewer(cv::FileStorage &fSettings) {
@@ -633,8 +640,15 @@ namespace ORB_SLAM3 {
         output << "\t-Features per image: " << settings.nFeatures_ << endl;
         output << "\t-ORB scale factor: " << settings.scaleFactor_ << endl;
         output << "\t-ORB number of scales: " << settings.nLevels_ << endl;
-        output << "\t-Initial FAST threshold: " << settings.initThFAST_ << endl;
-        output << "\t-Min FAST threshold: " << settings.minThFAST_ << endl;
+        output << "\t-Detector: " << (settings.useShiTomasi_
+            ? "Shi-Tomasi (hybrid frontend)" : "FAST (stock)") << endl;
+        if(!settings.useShiTomasi_){
+            output << "\t-Initial FAST threshold: " << settings.initThFAST_ << endl;
+            output << "\t-Min FAST threshold: " << settings.minThFAST_ << endl;
+        }
+        else{
+            output << "\t-(iniThFAST/minThFAST ignored by Shi-Tomasi)" << endl;
+        }
 
         return output;
     }

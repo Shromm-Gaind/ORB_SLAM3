@@ -46,8 +46,20 @@ public:
     
     enum {HARRIS_SCORE=0, FAST_SCORE=1 };
 
+    // HYBRID FRONTEND (design doc §4.5.2, §9.1): when useShiTomasi is
+    // true (the default), detection replaces FAST with multi-scale
+    // Shi-Tomasi (lambda2 of the structure tensor) at every pyramid
+    // level, selected by the per-level geometric target + quadtree
+    // ranked on lambda2 (§12.4's "rank" rule). Everything downstream —
+    // pyramid, quadtree, orientation, steered BRIEF, octave/size
+    // stamping — is unchanged, so descriptors remain bit-compatible
+    // with stock ORB-SLAM3 (§3.2). Pass false to restore stock FAST
+    // detection for A/B comparison (§9.2 step 3). iniThFAST/minThFAST
+    // are retained for the FAST path and ignored by the Shi-Tomasi
+    // path, whose selection is rank-based and needs no threshold
+    // tuning (§12.4).
     ORBextractor(int nfeatures, float scaleFactor, int nlevels,
-                 int iniThFAST, int minThFAST);
+                 int iniThFAST, int minThFAST, bool useShiTomasi = true);
 
     ~ORBextractor(){}
 
@@ -85,7 +97,12 @@ public:
 protected:
 
     void ComputePyramid(cv::Mat image);
-    void ComputeKeyPointsOctTree(std::vector<std::vector<cv::KeyPoint> >& allKeypoints);    
+    void ComputeKeyPointsOctTree(std::vector<std::vector<cv::KeyPoint> >& allKeypoints);
+    // HYBRID FRONTEND: multi-scale Shi-Tomasi detection (§4.5.2).
+    // Same output contract as ComputeKeyPointsOctTree: per-level
+    // keypoints in level coordinates with octave, size and response
+    // stamped, orientation computed. kp.response carries lambda2.
+    void ComputeKeyPointsShiTomasi(std::vector<std::vector<cv::KeyPoint> >& allKeypoints);
     std::vector<cv::KeyPoint> DistributeOctTree(const std::vector<cv::KeyPoint>& vToDistributeKeys, const int &minX,
                                            const int &maxX, const int &minY, const int &maxY, const int &nFeatures, const int &level);
 
@@ -97,6 +114,7 @@ protected:
     int nlevels;
     int iniThFAST;
     int minThFAST;
+    bool bUseShiTomasi;   // HYBRID FRONTEND: detector switch (§9.1)
 
     std::vector<int> mnFeaturesPerLevel;
 
@@ -111,4 +129,3 @@ protected:
 } //namespace ORB_SLAM
 
 #endif
-
