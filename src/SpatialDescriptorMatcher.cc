@@ -1,5 +1,3 @@
-// SpatialDescriptorMatcher.cc
-
 #include "SpatialDescriptorMatcher.h"
 
 #include <cmath>
@@ -58,25 +56,64 @@ std::vector<std::optional<Match>> SpatialDescriptorMatch(
         const PixelQuery& q = queries[i];
         const float radius = (q.radius > 0.0f) ? q.radius : opts.default_radius;
 
+        // Best candidate among those that pass their own (or the
+        // default) Hamming ceiling.
         int best_dist = std::numeric_limits<int>::max();
         std::size_t best_idx = 0;
         bool found = false;
+
+        // Two smallest distances over ALL spatially-gated candidates,
+        // passing or not, for the distinctiveness gate. min1 <= min2.
+        int min1 = std::numeric_limits<int>::max();
+        int min2 = std::numeric_limits<int>::max();
+        std::size_t n_spatial = 0;
 
         for (std::size_t j = 0; j < C; ++j) {
             const PixelCandidate& c = candidates[j];
             if (!within_radius(q.x, q.y, c.x, c.y, radius)) {
                 continue;
             }
+            ++n_spatial;
             const int d = HammingDistance(q.descriptor, c.descriptor);
-            if (d <= opts.hamming_threshold && d < best_dist) {
+
+            if (d < min1) {
+                min2 = min1;
+                min1 = d;
+            } else if (d < min2) {
+                min2 = d;
+            }
+
+            // Gate 1: each candidate is judged against its OWN ceiling
+            // (default when not overridden). Best = lowest Hamming among
+            // those that pass; ties keep the lower candidate index.
+            const int ceiling = (c.hamming_threshold > 0)
+                                    ? c.hamming_threshold
+                                    : opts.hamming_threshold;
+            if (d <= ceiling && d < best_dist) {
                 best_dist = d;
                 best_idx = j;
                 found = true;
             }
         }
-        if (found) {
-            out[i] = Match{best_idx, best_dist};
+        if (!found) {
+            continue;
         }
+
+        // Gate 2: distinctiveness. The second-best is over ALL spatial
+        // candidates: with min1 <= min2 the two smallest distances, the
+        // competitor to best_dist is min2 when best_dist is itself the
+        // smallest, otherwise min1 (a non-passing candidate can sit
+        // strictly below the best passing one, and its presence is
+        // still ambiguity). A single spatial candidate passes
+        // trivially.
+        if (opts.second_best_margin > 0 && n_spatial > 1) {
+            const int second_best = (min1 == best_dist) ? min2 : min1;
+            if (second_best - best_dist < opts.second_best_margin) {
+                continue;
+            }
+        }
+
+        out[i] = Match{best_idx, best_dist};
     }
 
     // Optional second pass: enforce unique candidates. For each

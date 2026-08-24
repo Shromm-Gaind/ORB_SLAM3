@@ -36,9 +36,12 @@
 #include "System.h"
 #include "ImuTypes.h"
 #include "Settings.h"
+#include "HybridFrontend.h"
+
 
 #include "GeometricCamera.h"
 
+#include <memory>
 #include <mutex>
 #include <unordered_set>
 
@@ -260,6 +263,11 @@ protected:
     //ORB
     ORBextractor* mpORBextractorLeft, *mpORBextractorRight;
     ORBextractor* mpIniORBextractor;
+
+    // Hybrid frontend (shadow mode: runs alongside stock tracking,
+    // logs per-frame results, drives nothing). §9.2 step 5, stage A.
+    std::unique_ptr<hybrid_frontend::HybridFrontend> mpHybridFrontend;
+    bool mbHybridShadow = false;
 
     //BoW
     ORBVocabulary* mpORBVocabulary;

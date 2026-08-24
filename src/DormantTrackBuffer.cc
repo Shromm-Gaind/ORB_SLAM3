@@ -1,5 +1,3 @@
-// DormantTrackBuffer.cc
-
 #include "DormantTrackBuffer.h"
 
 #include <algorithm>
@@ -74,6 +72,20 @@ bool DormantTrackBuffer::remove(std::uint64_t id) {
     }
     entries_.erase(it);
     return true;
+}
+
+void DormantTrackBuffer::translate_all(float dx, float dy) {
+    // Exact no-op guard, matching the Python reference. Worth keeping
+    // even though the loop below would be a no-op anyway: a stationary
+    // frame is the common case in a hovering AUV and this skips the
+    // whole pass.
+    if (dx == 0.0f && dy == 0.0f) {
+        return;
+    }
+    for (auto& e : entries_) {
+        e.last_x += dx;
+        e.last_y += dy;
+    }
 }
 
 }  // namespace hybrid_frontend

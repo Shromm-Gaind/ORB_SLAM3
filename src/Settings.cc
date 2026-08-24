@@ -487,6 +487,39 @@ namespace ORB_SLAM3 {
         bool found;
 
         thFarPoints_ = readParameter<float>(fSettings,"System.thFarPoints",found,false);
+        //hybrid shadow mode
+        hybridShadow_     = readParameter<int>(fSettings, "Hybrid.shadowMode",     found, false) != 0;
+        if(!found) hybridShadow_ = false;
+        hybridHorizon_    = readParameter<int>  (fSettings, "Hybrid.dormantHorizon", found, false);
+        if(!found) hybridHorizon_ = 10;
+        hybridReidRadius_ = readParameter<float>(fSettings, "Hybrid.reidRadius",     found, false);
+        if(!found) hybridReidRadius_ = 10.0f;
+        hybridThetaBase_  = readParameter<int>  (fSettings, "Hybrid.thetaBase",      found, false);
+        if(!found) hybridThetaBase_ = 63;
+        hybridThetaSlope_ = readParameter<float>(fSettings, "Hybrid.thetaSlope",     found, false);
+        if(!found) hybridThetaSlope_ = 1.2f;
+        hybridThetaCap_   = readParameter<int>  (fSettings, "Hybrid.thetaCap",       found, false);
+        if(!found) hybridThetaCap_ = 86;
+        hybridMargin_     = readParameter<int>  (fSettings, "Hybrid.secondBestMargin", found, false);
+        if(!found) hybridMargin_ = 0;
+        hybridMinAge_     = readParameter<int>  (fSettings, "Hybrid.minTrackAge",    found, false);
+        if(!found) hybridMinAge_ = 3;
+        hybridMaskRadius_ = readParameter<int>  (fSettings, "Hybrid.maskRadius",     found, false);
+        if(!found) hybridMaskRadius_ = 10;
+        hybridFbThresh_   = readParameter<float>(fSettings, "Hybrid.fbThreshold",    found, false);
+        if(!found) hybridFbThresh_ = 1.0f;
+        hybridRansacPx_   = readParameter<float>(fSettings, "Hybrid.ransacPx",       found, false);
+        if(!found) hybridRansacPx_ = 3.0f;
+        hybridKltLevels_  = readParameter<int>  (fSettings, "Hybrid.kltLevels",      found, false);
+        if(!found) hybridKltLevels_ = 3;
+        hybridKltWindow_  = readParameter<int>  (fSettings, "Hybrid.kltWindow",      found, false);
+        if(!found) hybridKltWindow_ = 21;
+        hybridLocalScale_ = readParameter<float>(fSettings, "Hybrid.localQualityScale", found, false);
+        if(!found) hybridLocalScale_ = 0.3f;
+        hybridEnableReid_ = readParameter<int>(fSettings, "Hybrid.enableReid", found, false) != 0;
+        if(!found) hybridEnableReid_ = true;
+        hybridUseRepDesc_ = readParameter<int>(fSettings, "Hybrid.useRepresentative", found, false) != 0;
+        if(!found) hybridUseRepDesc_ = true;
     }
 
     void Settings::precomputeRectificationMaps() {
@@ -640,6 +673,14 @@ namespace ORB_SLAM3 {
         output << "\t-Features per image: " << settings.nFeatures_ << endl;
         output << "\t-ORB scale factor: " << settings.scaleFactor_ << endl;
         output << "\t-ORB number of scales: " << settings.nLevels_ << endl;
+        output << "\t-Hybrid shadow mode: " << (settings.hybridShadow_ ? "ON" : "OFF") << endl;
+        output << "\t-Hybrid re-ID: " << (settings.hybridEnableReid_ ? "ON" : "OFF")
+               << ", horizon " << settings.hybridHorizon_ << " frames"
+               << ", r_reid " << settings.hybridReidRadius_ << " px" << endl;
+        output << "\t-Hybrid theta_reid: base " << settings.hybridThetaBase_
+               << " + " << settings.hybridThetaSlope_ << "/frame, cap "
+               << settings.hybridThetaCap_
+               << ", margin " << settings.hybridMargin_ << endl;
         output << "\t-Detector: " << (settings.useShiTomasi_
             ? "Shi-Tomasi (hybrid frontend)" : "FAST (stock)") << endl;
         if(!settings.useShiTomasi_){

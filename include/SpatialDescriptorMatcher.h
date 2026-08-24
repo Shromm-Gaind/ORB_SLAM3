@@ -1,5 +1,3 @@
-// SpatialDescriptorMatcher.h
-//
 // Shared primitive for Step 5 (dormant track re-ID) and Step 5b
 // (TrackLocalMap). Both steps reduce to: given a list of predicted
 // query locations + descriptors, and a list of candidate locations +
@@ -36,6 +34,17 @@ struct PixelCandidate {
     float x = 0.0f;
     float y = 0.0f;
     Descriptor256 descriptor{};
+    // Optional per-candidate Hamming ceiling (inclusive). If <= 0, the
+    // matcher uses opts.hamming_threshold. Mirrors PixelQuery::radius.
+    //
+    // This supports gap-scaled re-ID acceptance (§4.6): a dormant
+    // candidate that died g frames ago has accumulated ~g frames of
+    // viewpoint-driven descriptor drift, so its acceptance ceiling is
+    //     theta_eff(g) = min(theta_cap, theta_base + slope * g)
+    // computed by the caller (DormantTrackBuffer::gap_frames supplies
+    // g), while a 1-frame-gap candidate keeps the strict base
+    // threshold.
+    int hamming_threshold = -1;
 };
 
 struct MatchOptions {
@@ -57,6 +66,23 @@ struct MatchOptions {
     // on tiny candidate sets where conflicts are rare and the caller is
     // happy to handle them. Default false to keep the primitive minimal.
     bool unique_candidates = false;
+
+    // Ambiguity (distinctiveness) gate, ORB-SLAM3-style. If > 0, a
+    // query is only matched when its best passing candidate beats the
+    // second-best SPATIALLY-GATED candidate by at least this many
+    // Hamming bits:
+    //     second_best - best >= second_best_margin
+    // The second-best is taken over ALL spatial candidates, not only
+    // threshold-passing ones: a competitor just above its threshold is
+    // still evidence of ambiguity. A query with a single spatial
+    // candidate passes trivially (nothing to be confused with). 0
+    // disables the gate (legacy behaviour).
+    //
+    // This is the standard defence against descriptor aliasing on
+    // self-similar texture (§4.6): when two nearby candidates look
+    // equally good, refusing to match — a missed re-ID is recoverable,
+    // a wrong one poisons a landmark — beats guessing.
+    int second_best_margin = 0;
 };
 
 struct Match {

@@ -99,7 +99,26 @@ namespace ORB_SLAM3 {
         float initThFAST() {return initThFAST_;}
         float minThFAST() {return minThFAST_;}
         float scaleFactor() {return scaleFactor_;}
+
+        // Hybrid Frontend specific 
         bool useShiTomasi() {return useShiTomasi_;}   // HYBRID FRONTEND
+        bool hybridShadow() const { return hybridShadow_; } // hybrid shadow mode
+
+        int   hybridHorizon()    const { return hybridHorizon_; }
+        float hybridReidRadius() const { return hybridReidRadius_; }
+        int   hybridThetaBase()  const { return hybridThetaBase_; }
+        float hybridThetaSlope() const { return hybridThetaSlope_; }
+        int   hybridThetaCap()   const { return hybridThetaCap_; }
+        int   hybridMargin()     const { return hybridMargin_; }
+        int   hybridMinAge()     const { return hybridMinAge_; }
+        int   hybridMaskRadius() const { return hybridMaskRadius_; }
+        float hybridFbThresh()   const { return hybridFbThresh_; }
+        float hybridRansacPx()   const { return hybridRansacPx_; }
+        int   hybridKltLevels()  const { return hybridKltLevels_; }
+        int   hybridKltWindow()  const { return hybridKltWindow_; }
+        float hybridLocalScale() const { return hybridLocalScale_; }
+        bool  hybridEnableReid() const { return hybridEnableReid_; }
+        bool  hybridUseRepDesc() const { return hybridUseRepDesc_; }
 
         float keyFrameSize() {return keyFrameSize_;}
         float keyFrameLineWidth() {return keyFrameLineWidth_;}
@@ -207,6 +226,23 @@ namespace ORB_SLAM3 {
         int nLevels_;
         int initThFAST_, minThFAST_;
         bool useShiTomasi_ = true;   // HYBRID FRONTEND: detector switch
+        bool hybridShadow_ = false; //hybrid shadow: runs alongside stock algo
+        
+        int   hybridHorizon_     = 10;
+        float hybridReidRadius_  = 10.0f;
+        int   hybridThetaBase_   = 63;
+        float hybridThetaSlope_  = 1.2f;
+        int   hybridThetaCap_    = 86;
+        int   hybridMargin_      = 0;
+        int   hybridMinAge_      = 3;
+        int   hybridMaskRadius_  = 10;
+        float hybridFbThresh_    = 1.0f;
+        float hybridRansacPx_    = 3.0f;
+        int   hybridKltLevels_   = 3;
+        int   hybridKltWindow_   = 21;
+        float hybridLocalScale_  = 0.3f;
+        bool  hybridEnableReid_  = true;
+        bool  hybridUseRepDesc_  = true;
 
         /*
          * Viewer stuff

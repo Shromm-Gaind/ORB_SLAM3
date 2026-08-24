@@ -1,5 +1,3 @@
-// DormantTrackBuffer.h
-//
 // Short-term buffer of recently-died "infant" tracks (tracks that died
 // before being triangulated to a map point), keyed for spatial query.
 // Used by Step 5 of the hybrid frontend to re-identify a freshly spawned
@@ -43,6 +41,21 @@ struct DormantTrack {
     Descriptor256 descriptor{};  // birth descriptor (single shot, §4.1)
     std::uint64_t frame_died = 0;  // frame index at which KLT failed
     MapPointHandle map_point = nullptr;  // always nullptr for infants (§4.1)
+
+    // Pyramid level the feature was detected at. Carried through re-ID so
+    // the resurrected track keeps its characteristic scale: BRIEF is
+    // computed at kp.octave, TrackLocalMap's search radius is
+    // r_TLM(l) = 2 * 1.2^l, and bundle adjustment weights the observation
+    // by invLevelSigma2[octave]. A resurrected track that lost its octave
+    // would be described and searched at the wrong scale.
+    int octave = 0;
+
+    // Track age (frames survived) at the moment of death, carried back
+    // onto the resurrected track so an established landmark stays
+    // "established" for age-gated logic downstream (§4.1). Without this,
+    // resurrection silently demotes a long-lived track to a newborn and
+    // any age threshold has to re-earn its confidence from zero.
+    std::uint32_t age_at_death = 0;
 };
 
 class DormantTrackBuffer {
@@ -79,10 +92,53 @@ public:
     // Returns true iff an entry was removed.
     bool remove(std::uint64_t id);
 
+    // Shift every entry's predicted position by (dx, dy).
+    //
+    // Motion compensation for §4.6: the re-ID spatial window is
+    // "optionally propagated by the current motion model from the
+    // dormant track's last position". Callers apply the dominant image
+    // motion of the current frame (e.g. the median KLT flow of the
+    // surviving inlier tracks) ONCE PER FRAME, after purge and before
+    // any query_within, so that (last_x, last_y) becomes the *predicted*
+    // pixel location of the dormant landmark in the current frame rather
+    // than its stale location at death.
+    //
+    // Calling this more than once per frame double-counts the motion;
+    // calling it never means r_reid must absorb the full accumulated
+    // drift over the dormant horizon, which forces a radius wide enough
+    // to invite descriptor aliasing. It is a translation only — no
+    // rotation or scale — which is exactly right for the small
+    // inter-frame motions the dormant horizon spans.
+    //
+    // (dx, dy) == (0, 0) is a no-op. Positions are NOT clamped to the
+    // image: an entry pushed off-frame simply stops matching any query,
+    // which is the correct outcome, and it will expire on schedule.
+    void translate_all(float dx, float dy);
+
+    // Frames elapsed since the given entry died — the gap g used by the
+    // gap-scaled re-ID acceptance threshold in §4.6:
+    //     theta_eff(g) = min(theta_cap, theta_base + slope * g)
+    // A track that died g frames ago has accumulated ~g frames of
+    // viewpoint-driven descriptor drift, so its acceptance ceiling is
+    // relaxed in proportion. Returns 0 if current_frame precedes
+    // frame_died (clock went backwards; treat as "just died").
+    static std::uint64_t gap_frames(const DormantTrack& e,
+                                    std::uint64_t current_frame) noexcept {
+        return (current_frame > e.frame_died) ? (current_frame - e.frame_died)
+                                              : 0u;
+    }
+
     // Convenience for callers / tests.
     std::size_t size() const noexcept { return entries_.size(); }
     bool empty() const noexcept { return entries_.empty(); }
     std::uint64_t horizon() const noexcept { return horizon_; }
+
+    // Read-only view of every entry, for inspection and testing. Mirrors
+    // the Python all_entries(). Returned by const reference — do not
+    // hold it across a mutating call.
+    const std::deque<DormantTrack>& all_entries() const noexcept {
+        return entries_;
+    }
 
     // Drop everything (used on relocalization — §6.4: "purge the dormant
     // buffer on relocalization").

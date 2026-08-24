@@ -94,6 +94,42 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
         }
     }
 
+    if (settings && settings->hybridShadow()) {
+        hybrid_frontend::HybridConfig hcfg;
+        hcfg.target_active_tracks   = settings->nFeatures();
+        hcfg.klt_pyramid_levels     = settings->hybridKltLevels();
+        hcfg.klt_window             = cv::Size(settings->hybridKltWindow(),
+                                               settings->hybridKltWindow());
+        hcfg.fb_threshold_px        = settings->hybridFbThresh();
+        hcfg.ransac_reproj_px       = settings->hybridRansacPx();
+        hcfg.occupancy_mask_radius  = settings->hybridMaskRadius();
+        hcfg.dormant_min_track_age  = settings->hybridMinAge();
+        hcfg.dormant_horizon_frames = settings->hybridHorizon();
+        hcfg.reid_radius_px         = settings->hybridReidRadius();
+        hcfg.reid_hamming_threshold = settings->hybridThetaBase();
+        hcfg.reid_hamming_slope_per_frame = settings->hybridThetaSlope();
+        hcfg.reid_hamming_cap       = settings->hybridThetaCap();
+        hcfg.reid_second_best_margin= settings->hybridMargin();
+        hcfg.local_detect_quality_scale = settings->hybridLocalScale();
+        hcfg.enable_reid            = settings->hybridEnableReid();
+        hcfg.use_representative_descriptor = settings->hybridUseRepDesc();
+        // Descriptor pyramid (§8 s_p, n_lev) must match the extractor's,
+        // since dormant descriptors are compared against extractor
+        // descriptors once Stage B lands.
+        hcfg.descriptor_scale_factor = settings->scaleFactor();
+        hcfg.descriptor_levels       = settings->nLevels();
+        mpHybridFrontend =
+            std::make_unique<hybrid_frontend::HybridFrontend>(hcfg);
+        mbHybridShadow = true;
+        std::cout << "[Hybrid] shadow mode ON (target="
+                  << hcfg.target_active_tracks << ", horizon="
+                  << hcfg.dormant_horizon_frames << ", r_reid="
+                  << hcfg.reid_radius_px << ", theta="
+                  << hcfg.reid_hamming_threshold << "+"
+                  << hcfg.reid_hamming_slope_per_frame << "/f)"
+                  << std::endl;
+    }
+
     initID = 0; lastID = 0;
     mbInitWith3KFs = false;
     mnNumDataset = 0;
@@ -1498,6 +1534,28 @@ Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat 
         {
             cvtColor(mImGray,mImGray,cv::COLOR_BGRA2GRAY);
             cvtColor(imGrayRight,imGrayRight,cv::COLOR_BGRA2GRAY);
+        }
+    }
+
+    if (mbHybridShadow && mpHybridFrontend) {
+        if (mpHybridFrontend->frame_index() == 0 &&
+            mpHybridFrontend->active_tracks().empty()) {
+            mpHybridFrontend->initialize(mImGray);
+        } else {
+            const hybrid_frontend::FrameResult hr =
+                mpHybridFrontend->process_frame(mImGray);
+            std::cout << "[Hybrid] f=" << hr.frame_index
+                      << " in=" << hr.tracks_in
+                      << " klt=" << hr.tracks_after_klt
+                      << " fb=" << hr.tracks_after_fb
+                      << " ransac=" << hr.tracks_after_ransac
+                      << " new=" << hr.new_corners_detected
+                      << " reid=" << hr.reids_succeeded << "/"
+                      << hr.reids_attempted
+                      << " out=" << hr.tracks_out
+                      << " dorm=" << hr.dormant_buffer_size
+                      << " flow=(" << hr.median_flow_dx << ","
+                      << hr.median_flow_dy << ")" << std::endl;
         }
     }
 

@@ -1,5 +1,3 @@
-// test_SpatialDescriptorMatcher.cc
-//
 // Unit tests for SpatialDescriptorMatcher and HammingDistance.
 
 #include "SpatialDescriptorMatcher.h"
@@ -302,6 +300,270 @@ TEST(SpatialDescriptorMatcher, UniqueModeTieGoesToLowerIndex) {
     ASSERT_TRUE(out[0].has_value());
     EXPECT_EQ(out[0]->candidate_index, 0u);
     EXPECT_FALSE(out[1].has_value());
+}
+
+// ---- Matcher: per-candidate Hamming ceiling (gap-scaled θ_reid) ------
+
+TEST(SpatialDescriptorMatcher, PerCandidateThresholdRelaxesAcceptance) {
+    // §4.6 gap scaling: a long-dormant candidate carries a relaxed
+    // ceiling computed by the caller; the default would have rejected it.
+    MatchOptions opts;
+    opts.default_radius = 20.0f;
+    opts.hamming_threshold = 50;
+
+    PixelCandidate c = cand_at(100.0f, 100.0f, desc_with_bits(70));
+    c.hamming_threshold = 80;  // theta_eff(g) for a large gap g
+
+    std::vector<PixelQuery> q{query_at(100.0f, 100.0f, desc_zeros())};
+    std::vector<PixelCandidate> cs{c};
+
+    auto out = SpatialDescriptorMatch(q, cs, opts);
+    ASSERT_TRUE(out[0].has_value());
+    EXPECT_EQ(out[0]->hamming_distance, 70);
+}
+
+TEST(SpatialDescriptorMatcher, PerCandidateThresholdTightensAcceptance) {
+    // The override works in both directions: a fresh candidate can carry
+    // a ceiling stricter than the default.
+    MatchOptions opts;
+    opts.default_radius = 20.0f;
+    opts.hamming_threshold = 50;
+
+    PixelCandidate c = cand_at(100.0f, 100.0f, desc_with_bits(40));
+    c.hamming_threshold = 30;  // stricter than default; 40 > 30 -> reject
+
+    std::vector<PixelQuery> q{query_at(100.0f, 100.0f, desc_zeros())};
+    std::vector<PixelCandidate> cs{c};
+
+    auto out = SpatialDescriptorMatch(q, cs, opts);
+    EXPECT_FALSE(out[0].has_value());
+}
+
+TEST(SpatialDescriptorMatcher, PerCandidateThresholdNonPositiveUsesDefault) {
+    MatchOptions opts;
+    opts.default_radius = 20.0f;
+    opts.hamming_threshold = 50;
+
+    PixelCandidate c0 = cand_at(100.0f, 100.0f, desc_with_bits(45));
+    c0.hamming_threshold = 0;   // <= 0 -> default (45 <= 50 passes)
+    PixelCandidate c1 = cand_at(300.0f, 300.0f, desc_with_bits(45));
+    c1.hamming_threshold = -7;  // <= 0 -> default
+
+    std::vector<PixelQuery> q{
+        query_at(100.0f, 100.0f, desc_zeros()),
+        query_at(300.0f, 300.0f, desc_zeros()),
+    };
+    std::vector<PixelCandidate> cs{c0, c1};
+
+    auto out = SpatialDescriptorMatch(q, cs, opts);
+    EXPECT_TRUE(out[0].has_value());
+    EXPECT_TRUE(out[1].has_value());
+}
+
+TEST(SpatialDescriptorMatcher, PerCandidateThresholdEachJudgedByOwn) {
+    // Two candidates in radius: the nearer-in-Hamming one fails its own
+    // tight ceiling, so the match falls through to the farther one that
+    // passes its own. (The margin gate is off here; see the
+    // MarginConsidersNonPassingCompetitor test for the interaction.)
+    MatchOptions opts;
+    opts.default_radius = 50.0f;
+    opts.hamming_threshold = 256;
+
+    PixelCandidate tight = cand_at(101.0f, 100.0f, desc_with_bits(20));
+    tight.hamming_threshold = 10;   // 20 > 10 -> fails its own gate
+    PixelCandidate loose = cand_at(102.0f, 100.0f, desc_with_bits(60));
+    loose.hamming_threshold = 100;  // 60 <= 100 -> passes
+
+    std::vector<PixelQuery> q{query_at(100.0f, 100.0f, desc_zeros())};
+    std::vector<PixelCandidate> cs{tight, loose};
+
+    auto out = SpatialDescriptorMatch(q, cs, opts);
+    ASSERT_TRUE(out[0].has_value());
+    EXPECT_EQ(out[0]->candidate_index, 1u);
+    EXPECT_EQ(out[0]->hamming_distance, 60);
+}
+
+// ---- Matcher: second_best_margin distinctiveness gate ----------------
+
+TEST(SpatialDescriptorMatcher, MarginZeroDisablesGate) {
+    // Legacy behaviour: two near-identical candidates, gate off, best
+    // still wins.
+    MatchOptions opts;
+    opts.default_radius = 50.0f;
+    opts.hamming_threshold = 256;
+    opts.second_best_margin = 0;
+
+    std::vector<PixelQuery> q{query_at(100.0f, 100.0f, desc_zeros())};
+    std::vector<PixelCandidate> cs{
+        cand_at(101.0f, 100.0f, desc_with_bits(20)),
+        cand_at(102.0f, 100.0f, desc_with_bits(21)),
+    };
+    auto out = SpatialDescriptorMatch(q, cs, opts);
+    ASSERT_TRUE(out[0].has_value());
+    EXPECT_EQ(out[0]->candidate_index, 0u);
+}
+
+TEST(SpatialDescriptorMatcher, MarginRefusesAmbiguousPair) {
+    // 21 - 20 = 1 < 15: aliasing risk on self-similar texture -> refuse.
+    MatchOptions opts;
+    opts.default_radius = 50.0f;
+    opts.hamming_threshold = 256;
+    opts.second_best_margin = 15;
+
+    std::vector<PixelQuery> q{query_at(100.0f, 100.0f, desc_zeros())};
+    std::vector<PixelCandidate> cs{
+        cand_at(101.0f, 100.0f, desc_with_bits(20)),
+        cand_at(102.0f, 100.0f, desc_with_bits(21)),
+    };
+    auto out = SpatialDescriptorMatch(q, cs, opts);
+    EXPECT_FALSE(out[0].has_value());
+}
+
+TEST(SpatialDescriptorMatcher, MarginAcceptsDistinctPair) {
+    // 60 - 20 = 40 >= 15: clearly distinct -> accept the best.
+    MatchOptions opts;
+    opts.default_radius = 50.0f;
+    opts.hamming_threshold = 256;
+    opts.second_best_margin = 15;
+
+    std::vector<PixelQuery> q{query_at(100.0f, 100.0f, desc_zeros())};
+    std::vector<PixelCandidate> cs{
+        cand_at(101.0f, 100.0f, desc_with_bits(20)),
+        cand_at(102.0f, 100.0f, desc_with_bits(60)),
+    };
+    auto out = SpatialDescriptorMatch(q, cs, opts);
+    ASSERT_TRUE(out[0].has_value());
+    EXPECT_EQ(out[0]->candidate_index, 0u);
+    EXPECT_EQ(out[0]->hamming_distance, 20);
+}
+
+TEST(SpatialDescriptorMatcher, MarginBoundaryExactlyAtMarginAccepted) {
+    // second_best - best >= margin is inclusive: 35 - 20 = 15 == margin.
+    MatchOptions opts;
+    opts.default_radius = 50.0f;
+    opts.hamming_threshold = 256;
+    opts.second_best_margin = 15;
+
+    std::vector<PixelQuery> q{query_at(100.0f, 100.0f, desc_zeros())};
+    std::vector<PixelCandidate> cs{
+        cand_at(101.0f, 100.0f, desc_with_bits(20)),
+        cand_at(102.0f, 100.0f, desc_with_bits(35)),
+    };
+    auto out = SpatialDescriptorMatch(q, cs, opts);
+    ASSERT_TRUE(out[0].has_value());
+    EXPECT_EQ(out[0]->hamming_distance, 20);
+}
+
+TEST(SpatialDescriptorMatcher, MarginSingleCandidatePassesTrivially) {
+    // One spatial candidate: nothing to be confused with, gate skipped.
+    MatchOptions opts;
+    opts.default_radius = 50.0f;
+    opts.hamming_threshold = 256;
+    opts.second_best_margin = 100;  // huge margin, still passes
+
+    std::vector<PixelQuery> q{query_at(100.0f, 100.0f, desc_zeros())};
+    std::vector<PixelCandidate> cs{cand_at(101.0f, 100.0f, desc_with_bits(40))};
+    auto out = SpatialDescriptorMatch(q, cs, opts);
+    ASSERT_TRUE(out[0].has_value());
+}
+
+TEST(SpatialDescriptorMatcher, MarginIgnoresOutOfRadiusCompetitor) {
+    // The second-best is over SPATIALLY-GATED candidates only. A perfect
+    // twin outside the radius is not ambiguity.
+    MatchOptions opts;
+    opts.default_radius = 5.0f;
+    opts.hamming_threshold = 256;
+    opts.second_best_margin = 15;
+
+    std::vector<PixelQuery> q{query_at(100.0f, 100.0f, desc_zeros())};
+    std::vector<PixelCandidate> cs{
+        cand_at(102.0f, 100.0f, desc_with_bits(20)),  // in radius
+        cand_at(500.0f, 500.0f, desc_with_bits(20)),  // twin, out of radius
+    };
+    auto out = SpatialDescriptorMatch(q, cs, opts);
+    ASSERT_TRUE(out[0].has_value());
+    EXPECT_EQ(out[0]->candidate_index, 0u);
+}
+
+TEST(SpatialDescriptorMatcher, MarginConsidersNonPassingCompetitor) {
+    // The competitor fails its own tight ceiling (so it cannot BE the
+    // match) but sits within the margin of the best -> still ambiguity,
+    // still refuse. "A competitor just above its threshold is still
+    // evidence of ambiguity."
+    MatchOptions opts;
+    opts.default_radius = 50.0f;
+    opts.hamming_threshold = 256;
+    opts.second_best_margin = 15;
+
+    PixelCandidate competitor = cand_at(101.0f, 100.0f, desc_with_bits(25));
+    competitor.hamming_threshold = 10;  // 25 > 10: fails its own gate
+    PixelCandidate best = cand_at(102.0f, 100.0f, desc_with_bits(20));
+
+    std::vector<PixelQuery> q{query_at(100.0f, 100.0f, desc_zeros())};
+    std::vector<PixelCandidate> cs{competitor, best};
+    auto out = SpatialDescriptorMatch(q, cs, opts);
+    EXPECT_FALSE(out[0].has_value());
+}
+
+TEST(SpatialDescriptorMatcher, MarginNonPassingCompetitorBelowBest) {
+    // The non-passing competitor is strictly BETTER in Hamming than the
+    // best passing candidate: second_best - best is negative -> refuse.
+    MatchOptions opts;
+    opts.default_radius = 50.0f;
+    opts.hamming_threshold = 256;
+    opts.second_best_margin = 1;
+
+    PixelCandidate ghost = cand_at(101.0f, 100.0f, desc_with_bits(10));
+    ghost.hamming_threshold = 5;   // 10 > 5: fails its own gate
+    PixelCandidate best = cand_at(102.0f, 100.0f, desc_with_bits(30));
+
+    std::vector<PixelQuery> q{query_at(100.0f, 100.0f, desc_zeros())};
+    std::vector<PixelCandidate> cs{ghost, best};
+    auto out = SpatialDescriptorMatch(q, cs, opts);
+    EXPECT_FALSE(out[0].has_value());
+}
+
+TEST(SpatialDescriptorMatcher, MarginEqualDistancesRefused) {
+    // Exact tie between best and a spatial twin: margin 0 achieved,
+    // required >= 1 -> refuse. This is the aliasing case §4.6 exists for.
+    MatchOptions opts;
+    opts.default_radius = 50.0f;
+    opts.hamming_threshold = 256;
+    opts.second_best_margin = 1;
+
+    const auto pattern = desc_with_bits(20);
+    std::vector<PixelQuery> q{query_at(100.0f, 100.0f, desc_zeros())};
+    std::vector<PixelCandidate> cs{
+        cand_at(101.0f, 100.0f, pattern),
+        cand_at(102.0f, 100.0f, pattern),
+    };
+    auto out = SpatialDescriptorMatch(q, cs, opts);
+    EXPECT_FALSE(out[0].has_value());
+}
+
+TEST(SpatialDescriptorMatcher, MarginComposesWithUnique) {
+    // Query 0 is refused by the margin gate (two close candidates in its
+    // window); query 1 has a single distinct candidate and wins it.
+    // unique_candidates then has nothing to evict.
+    MatchOptions opts;
+    opts.default_radius = 10.0f;
+    opts.hamming_threshold = 256;
+    opts.second_best_margin = 15;
+    opts.unique_candidates = true;
+
+    std::vector<PixelQuery> q{
+        query_at(100.0f, 100.0f, desc_zeros()),
+        query_at(300.0f, 300.0f, desc_zeros()),
+    };
+    std::vector<PixelCandidate> cs{
+        cand_at(101.0f, 100.0f, desc_with_bits(20)),
+        cand_at(102.0f, 100.0f, desc_with_bits(22)),
+        cand_at(300.0f, 300.0f, desc_with_bits(30)),
+    };
+    auto out = SpatialDescriptorMatch(q, cs, opts);
+    EXPECT_FALSE(out[0].has_value());
+    ASSERT_TRUE(out[1].has_value());
+    EXPECT_EQ(out[1]->candidate_index, 2u);
 }
 
 TEST(SpatialDescriptorMatcher, UniqueModeMultipleCandidatesIndependent) {

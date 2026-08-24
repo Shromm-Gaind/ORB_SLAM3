@@ -219,6 +219,142 @@ TEST(DormantTrackBuffer, ClearEmpties) {
     EXPECT_EQ(buf.size(), 0u);
 }
 
+// ---- translate_all: motion compensation (§4.6) -----------------------
+
+TEST(DormantTrackBuffer, TranslateAllShiftsEveryEntry) {
+    DormantTrackBuffer buf(30);
+    buf.add(make_track(1, 100.0f, 100.0f, 0));
+    buf.add(make_track(2, 200.0f, 50.0f, 0));
+
+    buf.translate_all(5.0f, -3.0f);
+
+    // Query at the ORIGINAL location now misses with a tight radius...
+    auto stale = buf.query_within(100.0f, 100.0f, 1.0f);
+    EXPECT_TRUE(stale.empty());
+    // ...and the PREDICTED location hits.
+    auto moved = buf.query_within(105.0f, 97.0f, 1.0f);
+    ASSERT_EQ(moved.size(), 1u);
+    EXPECT_EQ(moved[0].id, 1u);
+
+    auto moved2 = buf.query_within(205.0f, 47.0f, 1.0f);
+    ASSERT_EQ(moved2.size(), 1u);
+    EXPECT_EQ(moved2[0].id, 2u);
+}
+
+TEST(DormantTrackBuffer, TranslateAllZeroIsNoOp) {
+    DormantTrackBuffer buf(30);
+    buf.add(make_track(1, 100.0f, 100.0f, 0));
+    buf.translate_all(0.0f, 0.0f);
+    auto hits = buf.query_within(100.0f, 100.0f, 0.0f);
+    ASSERT_EQ(hits.size(), 1u);
+}
+
+TEST(DormantTrackBuffer, TranslateAllAccumulates) {
+    // Two frames of motion compensation compose additively. This is the
+    // contract that makes "call it exactly once per frame" correct — and
+    // the reason calling it twice in one frame double-counts.
+    DormantTrackBuffer buf(30);
+    buf.add(make_track(1, 100.0f, 100.0f, 0));
+    buf.translate_all(4.0f, 0.0f);
+    buf.translate_all(3.0f, 0.0f);
+    auto hits = buf.query_within(107.0f, 100.0f, 0.0f);
+    EXPECT_EQ(hits.size(), 1u);
+}
+
+TEST(DormantTrackBuffer, TranslateAllOnEmptyBufferIsSafe) {
+    DormantTrackBuffer buf(30);
+    buf.translate_all(10.0f, 10.0f);
+    EXPECT_TRUE(buf.empty());
+}
+
+TEST(DormantTrackBuffer, TranslateAllAppliesToLaterAddsOnlyOnce) {
+    // An entry added AFTER this frame's translate_all must not receive
+    // that frame's shift — it was born at its true current position.
+    // This pins the intended per-frame ordering: purge -> translate ->
+    // query/re-ID -> add this frame's newly-dead tracks.
+    DormantTrackBuffer buf(30);
+    buf.add(make_track(1, 100.0f, 100.0f, 0));
+    buf.translate_all(10.0f, 0.0f);      // frame N motion
+    buf.add(make_track(2, 100.0f, 100.0f, 1));  // died at frame N, true position
+
+    auto old_entry = buf.query_within(110.0f, 100.0f, 0.0f);
+    ASSERT_EQ(old_entry.size(), 1u);
+    EXPECT_EQ(old_entry[0].id, 1u);
+
+    auto new_entry = buf.query_within(100.0f, 100.0f, 0.0f);
+    ASSERT_EQ(new_entry.size(), 1u);
+    EXPECT_EQ(new_entry[0].id, 2u);
+}
+
+TEST(DormantTrackBuffer, TranslateAllMayPushEntryOffFrame) {
+    // Documented behaviour: positions are not clamped. An entry driven
+    // off-image simply stops matching; it still expires on schedule.
+    DormantTrackBuffer buf(30);
+    buf.add(make_track(1, 10.0f, 10.0f, 0));
+    buf.translate_all(-500.0f, 0.0f);
+    EXPECT_EQ(buf.size(), 1u);
+    auto hits = buf.query_within(10.0f, 10.0f, 20.0f);
+    EXPECT_TRUE(hits.empty());
+}
+
+// ---- gap_frames: input to the gap-scaled threshold (§4.6) ------------
+
+TEST(DormantTrackBuffer, GapFramesBasic) {
+    auto t = make_track(1, 0.0f, 0.0f, /*frame_died=*/100);
+    EXPECT_EQ(DormantTrackBuffer::gap_frames(t, 100), 0u);
+    EXPECT_EQ(DormantTrackBuffer::gap_frames(t, 101), 1u);
+    EXPECT_EQ(DormantTrackBuffer::gap_frames(t, 130), 30u);
+}
+
+TEST(DormantTrackBuffer, GapFramesUnderflowSafe) {
+    // current_frame before frame_died must not wrap around on unsigned
+    // arithmetic — a 1.8e19 gap would blow past any theta_cap.
+    auto t = make_track(1, 0.0f, 0.0f, /*frame_died=*/100);
+    EXPECT_EQ(DormantTrackBuffer::gap_frames(t, 50), 0u);
+}
+
+// ---- octave and age_at_death carry-through ---------------------------
+
+TEST(DormantTrackBuffer, OctaveAndAgeSurviveRoundTrip) {
+    DormantTrackBuffer buf(30);
+    DormantTrack t = make_track(7, 100.0f, 100.0f, 42);
+    t.octave = 3;
+    t.age_at_death = 250;
+    buf.add(t);
+
+    auto hits = buf.query_within(100.0f, 100.0f, 1.0f);
+    ASSERT_EQ(hits.size(), 1u);
+    EXPECT_EQ(hits[0].octave, 3);
+    EXPECT_EQ(hits[0].age_at_death, 250u);
+    EXPECT_EQ(hits[0].frame_died, 42u);
+}
+
+TEST(DormantTrackBuffer, DefaultsAreInfantLike) {
+    // A track built without setting the new fields must look like a
+    // level-0 newborn, so existing call sites keep their old meaning.
+    DormantTrack t;
+    EXPECT_EQ(t.octave, 0);
+    EXPECT_EQ(t.age_at_death, 0u);
+    EXPECT_EQ(t.map_point, nullptr);
+}
+
+// ---- all_entries -----------------------------------------------------
+
+TEST(DormantTrackBuffer, AllEntriesReflectsContents) {
+    DormantTrackBuffer buf(30);
+    buf.add(make_track(1, 0.0f, 0.0f, 0));
+    buf.add(make_track(2, 0.0f, 0.0f, 0));
+
+    const auto& all = buf.all_entries();
+    ASSERT_EQ(all.size(), 2u);
+    EXPECT_EQ(all[0].id, 1u);
+    EXPECT_EQ(all[1].id, 2u);
+
+    buf.remove(1);
+    EXPECT_EQ(buf.all_entries().size(), 1u);
+    EXPECT_EQ(buf.all_entries()[0].id, 2u);
+}
+
 // ---- §4.1 / §7.4.2 invariants (debug-only asserts) ------------------
 
 #ifndef NDEBUG
