@@ -118,6 +118,7 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
         // descriptors once Stage B lands.
         hcfg.descriptor_scale_factor = settings->scaleFactor();
         hcfg.descriptor_levels       = settings->nLevels();
+        hcfg.multiscale_detection = settings->hybridMultiscale();
         mpHybridFrontend =
             std::make_unique<hybrid_frontend::HybridFrontend>(hcfg);
         mbHybridShadow = true;

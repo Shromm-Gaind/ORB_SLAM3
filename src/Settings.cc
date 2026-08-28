@@ -520,6 +520,8 @@ namespace ORB_SLAM3 {
         if(!found) hybridEnableReid_ = true;
         hybridUseRepDesc_ = readParameter<int>(fSettings, "Hybrid.useRepresentative", found, false) != 0;
         if(!found) hybridUseRepDesc_ = true;
+        hybridMultiscale_ = readParameter<int>(fSettings, "Hybrid.multiscale", found, false) != 0;
+        if(!found) hybridMultiscale_ = true;
     }
 
     void Settings::precomputeRectificationMaps() {
@@ -681,6 +683,11 @@ namespace ORB_SLAM3 {
                << " + " << settings.hybridThetaSlope_ << "/frame, cap "
                << settings.hybridThetaCap_
                << ", margin " << settings.hybridMargin_ << endl;
+        output << "\t-Hybrid detection: "
+                << (settings.hybridMultiscale_ ? "multi-octave (rank rule)"
+                                                : "level-0 only (ablation)")
+                << ", " << settings.nLevels_ << " levels @ "
+                << settings.scaleFactor_ << std::endl;
         output << "\t-Detector: " << (settings.useShiTomasi_
             ? "Shi-Tomasi (hybrid frontend)" : "FAST (stock)") << endl;
         if(!settings.useShiTomasi_){

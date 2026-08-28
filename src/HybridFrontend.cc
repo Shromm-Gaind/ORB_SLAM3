@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <chrono>
 #include <list>
 
 #include <opencv2/calib3d.hpp>
@@ -14,6 +15,11 @@
 namespace hybrid_frontend {
 
 namespace {
+
+using Clock = std::chrono::steady_clock;
+inline double ms_since(const Clock::time_point& t0) {
+    return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+}
 
 // ---- small numeric helpers -----------------------------------------
 
@@ -228,20 +234,161 @@ std::vector<cv::KeyPoint> distribute_quadtree(
     return out;
 }
 
+// ---- multi-octave detection (multiscale_shitomasi.py port) ---------
+
+// ORB-SLAM3-style pyramid: successive resize by 1/scale_factor,
+// INTER_LINEAR, no explicit pre-blur (cv::resize low-passes), floored
+// at 2*edge+2 so a level always has an interior.
+std::vector<cv::Mat> build_pyramid(const cv::Mat& gray, float scale_factor,
+                                   int nlevels, int edge) {
+    std::vector<cv::Mat> pyr{gray};
+    for (int l = 1; l < nlevels; ++l) {
+        const cv::Mat& prev = pyr.back();
+        const int w = std::max(2 * edge + 2, static_cast<int>(std::lround(
+            prev.cols / static_cast<double>(scale_factor))));
+        const int h = std::max(2 * edge + 2, static_cast<int>(std::lround(
+            prev.rows / static_cast<double>(scale_factor))));
+        cv::Mat next;
+        cv::resize(prev, next, cv::Size(w, h), 0, 0, cv::INTER_LINEAR);
+        pyr.push_back(next);
+    }
+    return pyr;
+}
+
+// Per-level Shi-Tomasi with the RANK rule settled by octave_rule_test:
+// 7x7 NMS peaks above a low noise floor (0.01*quality*level_max), then
+// the per-level geometric target enforced by the quadtree. Returns
+// LEVEL-0 coordinates with octave, size = patch*sf^octave, response =
+// lambda2. `level0_eig` is the caller's shared cornerMinEigenVal map.
+// The occupancy mask is applied per level via nearest resize; the
+// priority (dormant-seeding) split runs per level on lifted coords.
+// NOTE (faithful quirk): the quadtree receives the ROI dimensions
+// (w-2e, h-2e) but UNSHIFTED level coordinates, exactly as the Python
+// reference does; the resulting cell skew is part of the validated
+// selection behaviour and is preserved deliberately.
+std::vector<cv::KeyPoint> detect_multiscale_shi_tomasi(
+        const cv::Mat& gray, const cv::Mat& level0_eig,
+        const cv::Mat& mask, int target_n, const HybridConfig& cfg,
+        const cv::Mat* priority_map) {
+    const float sf = cfg.descriptor_scale_factor;
+    const int nlevels = std::max(1, cfg.descriptor_levels);
+    const int edge = cfg.descriptor_patch_size / 2;
+    const int nms_r = std::max(1, cfg.shi_tomasi_min_distance / 2);
+    const int block = cfg.shi_tomasi_block_size;
+
+    const auto pyr = build_pyramid(gray, sf, nlevels, edge);
+    const auto targets = level_target_counts(target_n, nlevels,
+                                             static_cast<double>(sf));
+    std::vector<cv::KeyPoint> all;
+    const cv::Mat nms_kernel = cv::Mat::ones(2 * nms_r + 1,
+                                             2 * nms_r + 1, CV_8U);
+    for (int lvl = 0; lvl < nlevels; ++lvl) {
+        const cv::Mat& img = pyr[static_cast<std::size_t>(lvl)];
+        const int h = img.rows, w = img.cols;
+        if (w <= 2 * edge || h <= 2 * edge) continue;
+
+        cv::Mat lam;
+        if (lvl == 0 && block == cfg.shi_tomasi_block_size &&
+            !level0_eig.empty())
+            lam = level0_eig;
+        else
+            cv::cornerMinEigenVal(img, lam, block);
+
+        cv::Mat lmask;
+        if (lvl == 0) lmask = mask;
+        else cv::resize(mask, lmask, img.size(), 0, 0, cv::INTER_NEAREST);
+
+        double lam_max = 0.0;
+        cv::minMaxLoc(lam(cv::Rect(edge, edge, w - 2 * edge,
+                                   h - 2 * edge)),
+                      nullptr, &lam_max);
+        const float thr = static_cast<float>(
+            0.01 * cfg.shi_tomasi_quality * lam_max);
+
+        cv::Mat dil;
+        cv::dilate(lam, dil, nms_kernel);
+
+        const float s = std::pow(sf, static_cast<float>(lvl));
+        std::vector<cv::KeyPoint> cands;
+        std::vector<cv::KeyPoint> near_kps, far_kps;
+        for (int y = edge; y < h - edge; ++y) {
+            const float* lrow = lam.ptr<float>(y);
+            const float* drow = dil.ptr<float>(y);
+            const std::uint8_t* mrow = lmask.ptr<std::uint8_t>(y);
+            for (int x = edge; x < w - edge; ++x) {
+                if (mrow[x] == 0) continue;
+                if (lrow[x] < drow[x] || lrow[x] <= thr) continue;
+                cv::KeyPoint kp(static_cast<float>(x),
+                                static_cast<float>(y), 7.0f, -1.0f,
+                                lrow[x]);
+                kp.octave = lvl;
+                cands.push_back(kp);
+            }
+        }
+        const int t_l = targets[static_cast<std::size_t>(lvl)];
+        std::vector<cv::KeyPoint> keep;
+        if (priority_map != nullptr &&
+            static_cast<int>(cands.size()) > t_l) {
+            const int ph = priority_map->rows, pw = priority_map->cols;
+            for (const auto& kp : cands) {
+                const int x0 = std::min(std::max(static_cast<int>(
+                    std::lround(kp.pt.x * s)), 0), pw - 1);
+                const int y0 = std::min(std::max(static_cast<int>(
+                    std::lround(kp.pt.y * s)), 0), ph - 1);
+                (priority_map->at<std::uint8_t>(y0, x0) ? near_kps
+                                                        : far_kps)
+                    .push_back(kp);
+            }
+            std::stable_sort(near_kps.begin(), near_kps.end(),
+                             [](const cv::KeyPoint& a,
+                                const cv::KeyPoint& b)
+                             { return a.response > b.response; });
+            if (static_cast<int>(near_kps.size()) > t_l)
+                near_kps.resize(static_cast<std::size_t>(t_l));
+            keep = near_kps;
+            const int rem = t_l - static_cast<int>(keep.size());
+            if (rem > 0) {
+                if (static_cast<int>(far_kps.size()) > rem) {
+                    auto extra = distribute_quadtree(
+                        far_kps, w - 2 * edge, h - 2 * edge, rem);
+                    keep.insert(keep.end(), extra.begin(), extra.end());
+                } else {
+                    keep.insert(keep.end(), far_kps.begin(),
+                                far_kps.end());
+                }
+            }
+        } else if (static_cast<int>(cands.size()) > t_l) {
+            keep = distribute_quadtree(cands, w - 2 * edge,
+                                       h - 2 * edge, t_l);
+        } else {
+            keep = cands;
+        }
+        for (auto& kp : keep) {
+            kp.pt.x *= s;
+            kp.pt.y *= s;
+            kp.octave = lvl;
+            kp.size = static_cast<float>(cfg.descriptor_patch_size) * s;
+        }
+        all.insert(all.end(), keep.begin(), keep.end());
+    }
+    return all;
+}
+
 // ---- Step 4 detection ----------------------------------------------
 
 std::vector<cv::KeyPoint> detect_shi_tomasi_with_quadtree(
-        const cv::Mat& gray, const cv::Mat& mask, int target_n,
-        double quality, int min_distance, int block_size,
+        const cv::Mat& gray, const cv::Mat& eig, const cv::Mat& mask,
+        int target_n, double quality, int min_distance, int block_size,
         const cv::Mat* priority_map, int pool_n) {
+    // `eig` is the caller's shared cornerMinEigenVal map for `gray`.
+    // Recomputing it here was a full-frame pass per call, and the cost
+    // is per-PIXEL, not per-feature, so it dominated at 1280x720.
     std::vector<cv::Point2f> pts;
     cv::goodFeaturesToTrack(gray, pts, pool_n, quality,
                             static_cast<double>(min_distance), mask,
                             block_size);
     if (pts.empty()) return {};
     const int h = gray.rows, w = gray.cols;
-    cv::Mat eig;
-    cv::cornerMinEigenVal(gray, eig, block_size);
     std::vector<cv::KeyPoint> kps;
     kps.reserve(pts.size());
     for (const auto& p : pts) {
@@ -288,12 +435,18 @@ std::vector<cv::KeyPoint> detect_shi_tomasi_with_quadtree(
 void compute_steered_brief(const cv::Mat& gray,
                            std::vector<cv::KeyPoint>& kps,
                            cv::Ptr<cv::ORB>& orb, int patch_size,
+                           float scale_factor,
                            std::vector<cv::KeyPoint>& kept,
                            cv::Mat& desc) {
     kept.clear();
     desc.release();
     if (kps.empty()) return;
-    for (auto& kp : kps) kp.size = static_cast<float>(patch_size);
+    // ORB.compute honours kp.octave (which of ITS pyramid levels the
+    // descriptor is taken from), so the patch size is stamped at the
+    // level's scale. Octave-0 keypoints degrade to the flat behaviour.
+    for (auto& kp : kps)
+        kp.size = static_cast<float>(patch_size) *
+                  std::pow(scale_factor, static_cast<float>(kp.octave));
     orb->compute(gray, kps, desc);
     kept = kps;   // OpenCV drops border keypoints from the vector itself
     if (desc.empty()) kept.clear();
@@ -303,13 +456,19 @@ void compute_steered_brief(const cv::Mat& gray,
 // drop, aligned via the class_id tag (ORB.compute preserves it).
 std::unordered_map<int, Descriptor256> descriptors_at_positions(
         const cv::Mat& gray, const std::vector<cv::Point2f>& xy,
-        cv::Ptr<cv::ORB>& orb, int patch_size) {
+        const std::vector<int>& octaves,
+        cv::Ptr<cv::ORB>& orb, int patch_size, float scale_factor) {
     std::unordered_map<int, Descriptor256> out;
     if (xy.empty()) return out;
+    assert(octaves.size() == xy.size());
     std::vector<cv::KeyPoint> kps;
     kps.reserve(xy.size());
     for (std::size_t i = 0; i < xy.size(); ++i) {
-        cv::KeyPoint kp(xy[i].x, xy[i].y, static_cast<float>(patch_size));
+        const float sc = std::pow(scale_factor,
+                                  static_cast<float>(octaves[i]));
+        cv::KeyPoint kp(xy[i].x, xy[i].y,
+                        static_cast<float>(patch_size) * sc);
+        kp.octave = octaves[i];
         kp.class_id = static_cast<int>(i);
         kps.push_back(kp);
     }
@@ -327,16 +486,14 @@ std::unordered_map<int, Descriptor256> descriptors_at_positions(
 // ---- local corners inside dormant windows --------------------------
 
 std::vector<cv::Point2f> local_corners_in_windows(
-        const cv::Mat& gray, const cv::Mat& mask,
+        const cv::Mat& gray, const cv::Mat& eig, const cv::Mat& mask,
         const std::vector<cv::Point2f>& centers, float radius,
-        int block_size, double quality, double quality_scale,
+        double quality, double quality_scale,
         int max_windows, float min_separation,
         const std::vector<cv::Point2f>& existing) {
     std::vector<cv::Point2f> chosen;
     if (centers.empty()) return chosen;
     const int h = gray.rows, w = gray.cols;
-    cv::Mat eig;
-    cv::cornerMinEigenVal(gray, eig, block_size);
     double eig_max = 0.0;
     cv::minMaxLoc(eig, nullptr, &eig_max);
     const float thresh = static_cast<float>(eig_max * quality * quality_scale);
@@ -414,6 +571,26 @@ std::vector<bool> ransac_inlier_mask(const std::vector<cv::Point2f>& prev,
 
 }  // namespace
 
+std::vector<int> level_target_counts(int target_n, int nlevels,
+                                     double scale_factor) {
+    // Faithful to multiscale_shitomasi.level_target_counts: geometric
+    // series rounded per level, remainder (>=1) into the top level.
+    std::vector<int> counts;
+    if (nlevels <= 1) { counts.push_back(target_n); return counts; }
+    const double factor = 1.0 / scale_factor;
+    const double unscaled = target_n * (1.0 - factor) /
+                            (1.0 - std::pow(factor, nlevels));
+    int cum = 0;
+    for (int lvl = 0; lvl < nlevels - 1; ++lvl) {
+        const int n = static_cast<int>(std::lround(
+            unscaled * std::pow(factor, lvl)));
+        counts.push_back(n);
+        cum += n;
+    }
+    counts.push_back(std::max(1, target_n - cum));
+    return counts;
+}
+
 // ---- HybridFrontend ------------------------------------------------
 
 HybridFrontend::HybridFrontend(const HybridConfig& cfg)
@@ -437,19 +614,30 @@ void HybridFrontend::initialize(const cv::Mat& first_gray) {
     active_order_.clear();
     dormant_buffer_.clear();
     cv::Mat full_mask(first_gray.size(), CV_8U, cv::Scalar(255));
-    auto kps = detect_shi_tomasi_with_quadtree(
-        first_gray, full_mask, cfg_.target_active_tracks,
-        cfg_.shi_tomasi_quality, cfg_.shi_tomasi_min_distance,
-        cfg_.shi_tomasi_block_size, nullptr,
-        cfg_.target_active_tracks * 2);
+    cv::Mat eig;
+    cv::cornerMinEigenVal(first_gray, eig, cfg_.shi_tomasi_block_size);
+    std::vector<cv::KeyPoint> kps;
+    if (cfg_.multiscale_detection)
+        kps = detect_multiscale_shi_tomasi(first_gray, eig, full_mask,
+                                           cfg_.target_active_tracks,
+                                           cfg_, nullptr);
+    else
+        kps = detect_shi_tomasi_with_quadtree(
+            first_gray, eig, full_mask, cfg_.target_active_tracks,
+            cfg_.shi_tomasi_quality, cfg_.shi_tomasi_min_distance,
+            cfg_.shi_tomasi_block_size, nullptr,
+            cfg_.target_active_tracks * 2);
     std::vector<cv::KeyPoint> kept;
     cv::Mat desc;
     compute_steered_brief(first_gray, kps, orb_,
-                          cfg_.descriptor_patch_size, kept, desc);
+                          cfg_.descriptor_patch_size,
+                          cfg_.descriptor_scale_factor, kept, desc);
     for (int i = 0; i < static_cast<int>(kept.size()); ++i)
         spawn_track(kept[static_cast<std::size_t>(i)].pt.x,
                     kept[static_cast<std::size_t>(i)].pt.y,
-                    to_desc(desc.row(i)), 0, 0, false, 0, nullptr);
+                    to_desc(desc.row(i)),
+                    kept[static_cast<std::size_t>(i)].octave,
+                    0, false, 0, nullptr);
     prev_gray_ = first_gray.clone();
 }
 
@@ -458,6 +646,8 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
     assert(curr_gray.type() == CV_8U);
     ++frame_index_;
     const HybridConfig& cfg = cfg_;
+    const Clock::time_point t_start = Clock::now();
+    Clock::time_point t_mark = t_start;
 
     // Purge every frame — purging only when Step 4 fires lets the
     // buffer grow unboundedly whenever the active set stays at target.
@@ -555,20 +745,26 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
 
         // Representative-descriptor accumulation for survivors.
         if (cfg.use_representative_descriptor && !kept_ids.empty()) {
-            std::vector<cv::Point2f> pos;
-            pos.reserve(kept_ids.size());
-            for (std::uint64_t id : kept_ids) {
-                const ActiveTrack& t = active_tracks_.at(id);
-                pos.emplace_back(t.x, t.y);
-            }
-            auto fresh = descriptors_at_positions(
-                curr_gray, pos, orb_, cfg.descriptor_patch_size);
+            // Apply the stride gate BEFORE describing: only tracks due
+            // for a sample this frame need a descriptor computed.
             const std::uint32_t stride = static_cast<std::uint32_t>(
                 std::max(1, cfg.representative_sample_stride));
+            std::vector<std::uint64_t> sampled;
+            std::vector<cv::Point2f> pos;
+            std::vector<int> oct;
+            for (std::uint64_t id : kept_ids) {
+                const ActiveTrack& t = active_tracks_.at(id);
+                if (t.age % stride != 0) continue;
+                sampled.push_back(id);
+                pos.emplace_back(t.x, t.y);
+                oct.push_back(t.octave);
+            }
+            auto fresh = descriptors_at_positions(
+                curr_gray, pos, oct, orb_, cfg.descriptor_patch_size,
+                cfg.descriptor_scale_factor);
             for (const auto& kv : fresh) {
                 ActiveTrack& t = active_tracks_.at(
-                    kept_ids[static_cast<std::size_t>(kv.first)]);
-                if (t.age % stride != 0) continue;
+                    sampled[static_cast<std::size_t>(kv.first)]);
                 t.descriptor_history.push_back(kv.second);
                 if (static_cast<int>(t.descriptor_history.size()) >
                     cfg.representative_max_observations)
@@ -593,14 +789,29 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
                 if (!kept_set.count(id)) dying.push_back(id);
         }
         if (!dying.empty()) {
+            // Only tracks that will actually be BUFFERED need a
+            // death-time descriptor. Infants are retired unread by the
+            // min-age gate below, and on real footage they dominate
+            // deaths, so describing them first was the single largest
+            // wasted cost per frame.
+            const std::uint32_t min_age = static_cast<std::uint32_t>(
+                std::max(0, cfg.dormant_min_track_age));
             std::vector<cv::Point2f> dpos;
-            dpos.reserve(dying.size());
-            for (std::uint64_t id : dying) {
-                const ActiveTrack& t = active_tracks_.at(id);
+            std::vector<int> doct;
+            std::vector<std::size_t> dmap;   // dpos index -> dying index
+            for (std::size_t k = 0; k < dying.size(); ++k) {
+                const ActiveTrack& t = active_tracks_.at(dying[k]);
+                if (t.age < min_age) continue;
+                dmap.push_back(k);
                 dpos.emplace_back(t.x, t.y);
+                doct.push_back(t.octave);
             }
-            auto death_desc = descriptors_at_positions(
-                prev_gray_, dpos, orb_, cfg.descriptor_patch_size);
+            auto desc_by_pos = descriptors_at_positions(
+                prev_gray_, dpos, doct, orb_, cfg.descriptor_patch_size,
+                cfg.descriptor_scale_factor);
+            std::unordered_map<std::size_t, Descriptor256> death_desc;
+            for (const auto& kv : desc_by_pos)
+                death_desc[dmap[static_cast<std::size_t>(kv.first)]] = kv.second;
             for (std::size_t k = 0; k < dying.size(); ++k) {
                 const std::uint64_t tid = dying[k];
                 ActiveTrack t = active_tracks_.at(tid);
@@ -609,11 +820,10 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
                     std::find(active_order_.begin(), active_order_.end(),
                               tid));
                 res.died_this_frame.push_back({tid, t.x, t.y});
-                if (t.age < static_cast<std::uint32_t>(
-                        std::max(0, cfg.dormant_min_track_age)))
+                if (t.age < min_age)
                     continue;   // retire: mostly detector noise
                 Descriptor256 stored = t.birth_descriptor;
-                const auto it = death_desc.find(static_cast<int>(k));
+                const auto it = death_desc.find(k);
                 if (it != death_desc.end()) stored = it->second;
                 if (cfg.use_representative_descriptor && t.has_representative)
                     stored = t.representative_descriptor;
@@ -636,10 +846,17 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
         }
     }
 
+    res.ms_track = ms_since(t_mark);
+    t_mark = Clock::now();
+
     // ============ Step 4: Shi-Tomasi top-up + BRIEF =================
     const int deficit =
         cfg.target_active_tracks - static_cast<int>(active_tracks_.size());
     if (deficit > 0) {
+        // ONE cornerMinEigenVal pass per frame, shared by Step 4
+        // response sampling and Step 5 local detection.
+        cv::Mat eig;
+        cv::cornerMinEigenVal(curr_gray, eig, cfg.shi_tomasi_block_size);
         cv::Mat mask = build_occupancy_mask(curr_gray.size(), active_tracks_,
                                             active_order_,
                                             cfg.occupancy_mask_radius);
@@ -657,15 +874,25 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
                      std::min<int>(static_cast<int>(dormant_buffer_.size()),
                                    500);
         }
-        auto kps = detect_shi_tomasi_with_quadtree(
-            curr_gray, mask, deficit, cfg.shi_tomasi_quality,
-            cfg.shi_tomasi_min_distance, cfg.shi_tomasi_block_size,
-            priority_ptr, pool_n);
+        std::vector<cv::KeyPoint> kps;
+        if (cfg.multiscale_detection)
+            kps = detect_multiscale_shi_tomasi(curr_gray, eig, mask,
+                                               deficit, cfg,
+                                               priority_ptr);
+        else
+            kps = detect_shi_tomasi_with_quadtree(
+                curr_gray, eig, mask, deficit, cfg.shi_tomasi_quality,
+                cfg.shi_tomasi_min_distance, cfg.shi_tomasi_block_size,
+                priority_ptr, pool_n);
         std::vector<cv::KeyPoint> kept;
         cv::Mat desc;
         compute_steered_brief(curr_gray, kps, orb_,
-                              cfg.descriptor_patch_size, kept, desc);
+                              cfg.descriptor_patch_size,
+                              cfg.descriptor_scale_factor, kept, desc);
         res.new_corners_detected = static_cast<int>(kept.size());
+
+        res.ms_detect = ms_since(t_mark);
+        t_mark = Clock::now();
 
         // ============ Step 5: re-ID against the dormant buffer ======
         if (cfg.enable_reid && !dormant_buffer_.empty()) {
@@ -675,9 +902,11 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
             // active set past N_target.
             std::vector<cv::Point2f> q_xy;
             std::vector<Descriptor256> q_desc;
+            std::vector<int> q_oct;
             for (int i = 0; i < static_cast<int>(kept.size()); ++i) {
                 q_xy.push_back(kept[static_cast<std::size_t>(i)].pt);
                 q_desc.push_back(to_desc(desc.row(i)));
+                q_oct.push_back(kept[static_cast<std::size_t>(i)].octave);
             }
             const int n_global = static_cast<int>(q_xy.size());
 
@@ -685,12 +914,11 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
                 std::vector<cv::Point2f> dorm_pos;
                 for (const auto& e : dormant_buffer_.all_entries())
                     dorm_pos.emplace_back(e.last_x, e.last_y);
-                cv::Mat local_mask = build_occupancy_mask(
-                    curr_gray.size(), active_tracks_, active_order_,
-                    cfg.occupancy_mask_radius);
+                // Same mask as Step 4: nothing has been spawned yet, so
+                // rebuilding it would produce an identical result.
                 auto local_xy = local_corners_in_windows(
-                    curr_gray, local_mask, dorm_pos, cfg.reid_radius_px,
-                    cfg.shi_tomasi_block_size, cfg.shi_tomasi_quality,
+                    curr_gray, eig, mask, dorm_pos, cfg.reid_radius_px,
+                    cfg.shi_tomasi_quality,
                     cfg.local_detect_quality_scale,
                     cfg.local_detect_max_windows,
                     static_cast<float>(cfg.shi_tomasi_min_distance), q_xy);
@@ -704,11 +932,13 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
                     cv::Mat ldesc;
                     compute_steered_brief(curr_gray, lk, orb_,
                                           cfg.descriptor_patch_size,
+                                          cfg.descriptor_scale_factor,
                                           lkept, ldesc);
                     for (int j = 0; j < static_cast<int>(lkept.size()); ++j) {
                         q_xy.push_back(
                             lkept[static_cast<std::size_t>(j)].pt);
                         q_desc.push_back(to_desc(ldesc.row(j)));
+                        q_oct.push_back(0);   // level-0 booster corners
                     }
                 }
             }
@@ -762,7 +992,10 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
                 if (!matches[i].has_value() || budget <= 0) continue;
                 const DormantTrack& dt =
                     all_dormant[matches[i]->candidate_index];
-                spawn_track(q_xy[i].x, q_xy[i].y, q_desc[i], 0,
+                // Resurrect at the track's ORIGINAL octave: identity
+                // includes scale. (In the PoC every octave was 0, so
+                // this is behaviourally identical in that regime.)
+                spawn_track(q_xy[i].x, q_xy[i].y, q_desc[i], dt.octave,
                             dt.id, true, dt.age_at_death, &dt.descriptor);
                 dormant_buffer_.remove(dt.id);
                 res.resurrected_ids.push_back(dt.id);
@@ -773,7 +1006,7 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
                 if (matches[i].has_value() ||
                     static_cast<int>(i) >= n_global || budget <= 0)
                     continue;
-                spawn_track(q_xy[i].x, q_xy[i].y, q_desc[i], 0,
+                spawn_track(q_xy[i].x, q_xy[i].y, q_desc[i], q_oct[i],
                             0, false, 0, nullptr);
                 --budget;
             }
@@ -781,7 +1014,9 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
             for (int i = 0; i < static_cast<int>(kept.size()); ++i)
                 spawn_track(kept[static_cast<std::size_t>(i)].pt.x,
                             kept[static_cast<std::size_t>(i)].pt.y,
-                            to_desc(desc.row(i)), 0, 0, false, 0, nullptr);
+                            to_desc(desc.row(i)),
+                            kept[static_cast<std::size_t>(i)].octave,
+                            0, false, 0, nullptr);
         }
     }
 
@@ -790,6 +1025,8 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
     res.dormant_buffer_size = dormant_buffer_.size();
     res.median_flow_dx = flow_dx;
     res.median_flow_dy = flow_dy;
+    res.ms_reid = ms_since(t_mark);
+    res.ms_total = ms_since(t_start);
     return res;
 }
 
@@ -797,14 +1034,17 @@ std::vector<DeathRecord> HybridFrontend::force_kill(
         const std::vector<std::uint64_t>& ids) {
     std::vector<std::uint64_t> victims;
     std::vector<cv::Point2f> pos;
+    std::vector<int> oct;
     for (std::uint64_t id : ids) {
         auto it = active_tracks_.find(id);
         if (it == active_tracks_.end()) continue;
         victims.push_back(id);
         pos.emplace_back(it->second.x, it->second.y);
+        oct.push_back(it->second.octave);
     }
-    auto death_desc = descriptors_at_positions(prev_gray_, pos, orb_,
-                                               cfg_.descriptor_patch_size);
+    auto death_desc = descriptors_at_positions(
+        prev_gray_, pos, oct, orb_, cfg_.descriptor_patch_size,
+        cfg_.descriptor_scale_factor);
     std::vector<DeathRecord> killed;
     for (std::size_t k = 0; k < victims.size(); ++k) {
         const std::uint64_t tid = victims[k];
