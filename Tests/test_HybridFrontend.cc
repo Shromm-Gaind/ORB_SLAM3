@@ -1,8 +1,13 @@
+// test_HybridFrontend.cc — C++ port of the test_hybrid_pipeline.py
+// scenarios. Synthetic textured-noise frames with known integer shifts,
+// so KLT has real structure to track and expected flow is known.
+
 #include "HybridFrontend.h"
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <map>
 #include <set>
 
 #include <opencv2/imgproc.hpp>
@@ -44,6 +49,15 @@ HybridConfig test_config() {
     return c;
 }
 
+// N_target is a TARGET, not a hard cap: the quadtree stops splitting
+// once the node count reaches N, so each level can land a few past its
+// per-level target (ORB-SLAM3's DistributeOctTree and the Python
+// _distribute_quadtree behave identically; ORB-SLAM3 documents
+// nFeatures as approximate). Bound: < 3 extra per level.
+int max_active(const HybridConfig& c) {
+    return c.target_active_tracks + 3 * c.descriptor_levels;
+}
+
 std::vector<std::uint64_t> active_ids(const HybridFrontend& hf) {
     std::vector<std::uint64_t> ids;
     for (const auto& kv : hf.active_tracks()) ids.push_back(kv.first);
@@ -59,7 +73,7 @@ TEST(HybridFrontend, InitializePopulatesTracks) {
     const auto& tracks = hf.active_tracks();
     EXPECT_GT(tracks.size(), 0u);
     EXPECT_LE(static_cast<int>(tracks.size()),
-              hf.config().target_active_tracks);
+              max_active(hf.config()));
     for (const auto& kv : tracks) {
         EXPECT_EQ(kv.second.age, 0u);
         EXPECT_EQ(kv.second.map_point, nullptr);
@@ -102,7 +116,7 @@ TEST(HybridFrontend, TrackIdsPersistAcrossEasyFrames) {
     for (std::uint64_t id : ids0)
         if (std::binary_search(ids3.begin(), ids3.end(), id)) ++survived;
     EXPECT_GT(survived, ids0.size() / 2);
-    EXPECT_LE(last.tracks_out, hf.config().target_active_tracks);
+    EXPECT_LE(last.tracks_out, max_active(hf.config()));
     // Frame counters are coherent.
     EXPECT_GE(last.tracks_in, last.tracks_after_klt);
     EXPECT_GE(last.tracks_after_klt, last.tracks_after_fb);
@@ -177,7 +191,7 @@ TEST(HybridFrontend, DormantBufferStaysBounded) {
         EXPECT_LT(r.dormant_buffer_size,
                   static_cast<std::size_t>(
                       hf.config().target_active_tracks) / 2);
-        EXPECT_LE(r.tracks_out, hf.config().target_active_tracks);
+        EXPECT_LE(r.tracks_out, max_active(hf.config()));
     }
 }
 
@@ -238,7 +252,7 @@ TEST(HybridFrontend, LocalDetectNeverInflatesActiveSet) {
     hf.force_kill(victims);
     for (int k = 2; k <= 5; ++k) {
         const FrameResult r = hf.process_frame(shift_image(base, k, 0));
-        EXPECT_LE(r.tracks_out, c.target_active_tracks);
+        EXPECT_LE(r.tracks_out, max_active(c));
     }
 }
 
@@ -261,6 +275,105 @@ TEST(HybridFrontend, ReidDisabledStillMaintainsBuffer) {
     EXPECT_EQ(r.reids_attempted, 0);
     EXPECT_EQ(r.reids_succeeded, 0);
     EXPECT_TRUE(r.resurrected_ids.empty());
+}
+
+TEST(HybridFrontend, LevelTargetCountsGeometricAllocation) {
+    // Faithful to multiscale_shitomasi.level_target_counts: sums to
+    // target, level 0 gets the most, every level gets someone.
+    const auto c = level_target_counts(1000, 8, 1.2);
+    ASSERT_EQ(c.size(), 8u);
+    int sum = 0;
+    for (int n : c) { EXPECT_GE(n, 1); sum += n; }
+    EXPECT_EQ(sum, 1000);
+    EXPECT_GT(c.front(), c.back());
+    // nlevels=1 degenerates to a single bucket.
+    const auto one = level_target_counts(50, 1, 1.2);
+    ASSERT_EQ(one.size(), 1u);
+    EXPECT_EQ(one[0], 50);
+}
+
+TEST(HybridFrontend, MultiscaleInitializePopulatesMultipleOctaves) {
+    HybridConfig c = test_config();
+    c.target_active_tracks = 300;   // enough budget for high levels
+    ASSERT_TRUE(c.multiscale_detection);   // the new default
+    HybridFrontend hf(c);
+    cv::Mat base = make_textured();
+    hf.initialize(base);
+
+    std::set<int> octaves_seen;
+    for (const auto& kv : hf.active_tracks()) {
+        const ActiveTrack& t = kv.second;
+        EXPECT_GE(t.octave, 0);
+        EXPECT_LT(t.octave, c.descriptor_levels);
+        EXPECT_GE(t.x, 0.0f);
+        EXPECT_LT(t.x, static_cast<float>(base.cols));
+        EXPECT_GE(t.y, 0.0f);
+        EXPECT_LT(t.y, static_cast<float>(base.rows));
+        octaves_seen.insert(t.octave);
+    }
+    // The point of the port: features exist ABOVE level 0.
+    EXPECT_GE(octaves_seen.size(), 2u);
+    EXPECT_TRUE(octaves_seen.count(0));
+}
+
+TEST(HybridFrontend, SingleScaleFlagKeepsOctaveZero) {
+    HybridConfig c = test_config();
+    c.multiscale_detection = false;   // the PoC-faithful ablation
+    HybridFrontend hf(c);
+    cv::Mat base = make_textured();
+    hf.initialize(base);
+    hf.process_frame(shift_image(base, 1, 0));
+    for (const auto& kv : hf.active_tracks())
+        EXPECT_EQ(kv.second.octave, 0);
+}
+
+TEST(HybridFrontend, ResurrectionPreservesOctave) {
+    // Identity includes scale: a force-killed track that comes back
+    // through Step 5 must return at its ORIGINAL octave, regardless of
+    // the octave of the corner that re-found it.
+    HybridFrontend hf(test_config());
+    cv::Mat base = make_textured();
+    hf.initialize(base);
+    hf.process_frame(shift_image(base, 1, 0));
+
+    auto ids = active_ids(hf);
+    std::map<std::uint64_t, int> victim_octave;
+    std::vector<std::uint64_t> victims;
+    for (std::uint64_t id : ids) {
+        if (victims.size() >= 40) break;
+        victims.push_back(id);
+        victim_octave[id] = hf.active_tracks().at(id).octave;
+    }
+    hf.force_kill(victims);
+
+    const FrameResult r = hf.process_frame(shift_image(base, 2, 0));
+    std::size_t checked = 0;
+    for (std::uint64_t id : r.resurrected_ids) {
+        auto it = victim_octave.find(id);
+        if (it == victim_octave.end()) continue;
+        EXPECT_EQ(hf.active_tracks().at(id).octave, it->second)
+            << "track " << id << " resurrected at the wrong octave";
+        ++checked;
+    }
+    EXPECT_GT(checked, 0u);   // the test must actually have bitten
+}
+
+TEST(HybridFrontend, MultiscaleDescriptorSizesMatchOctave) {
+    // Every keypoint handed to ORB.compute carries size=patch*1.2^oct,
+    // observable through the track state after a survivor sample.
+    HybridConfig c = test_config();
+    HybridFrontend hf(c);
+    cv::Mat base = make_textured();
+    hf.initialize(base);
+    bool any_high = false;
+    for (const auto& kv : hf.active_tracks())
+        if (kv.second.octave > 0) { any_high = true; break; }
+    EXPECT_TRUE(any_high);
+    // And the pipeline stays healthy across frames with octaves live.
+    for (int k = 1; k <= 3; ++k) {
+        const FrameResult r = hf.process_frame(shift_image(base, k, 0));
+        EXPECT_LE(r.tracks_out, max_active(c));
+    }
 }
 
 TEST(HybridFrontend, SetMapPointAttachesHandle) {

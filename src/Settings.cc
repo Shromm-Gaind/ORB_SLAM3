@@ -522,6 +522,8 @@ namespace ORB_SLAM3 {
         if(!found) hybridUseRepDesc_ = true;
         hybridMultiscale_ = readParameter<int>(fSettings, "Hybrid.multiscale", found, false) != 0;
         if(!found) hybridMultiscale_ = true;
+        hybridMinDeficit_ = readParameter<float>(fSettings, "Hybrid.minDeficitFraction", found, false) != 0;
+        if(!found) hybridMinDeficit_ = true;
     }
 
     void Settings::precomputeRectificationMaps() {
@@ -688,6 +690,8 @@ namespace ORB_SLAM3 {
                                                 : "level-0 only (ablation)")
                 << ", " << settings.nLevels_ << " levels @ "
                 << settings.scaleFactor_ << std::endl;
+        output << "\t-Hybrid detect gate: min deficit "
+                << settings.hybridMinDeficit_ << " of N_target" << endl;
         output << "\t-Detector: " << (settings.useShiTomasi_
             ? "Shi-Tomasi (hybrid frontend)" : "FAST (stock)") << endl;
         if(!settings.useShiTomasi_){

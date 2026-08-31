@@ -119,6 +119,7 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
         hcfg.descriptor_scale_factor = settings->scaleFactor();
         hcfg.descriptor_levels       = settings->nLevels();
         hcfg.multiscale_detection = settings->hybridMultiscale();
+        hcfg.min_deficit_fraction = settings->hybridMinDeficit();
         mpHybridFrontend =
             std::make_unique<hybrid_frontend::HybridFrontend>(hcfg);
         mbHybridShadow = true;
@@ -1556,7 +1557,14 @@ Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat 
                       << " out=" << hr.tracks_out
                       << " dorm=" << hr.dormant_buffer_size
                       << " flow=(" << hr.median_flow_dx << ","
-                      << hr.median_flow_dy << ")" << std::endl;
+                      << hr.median_flow_dy << ")"
+                      << " ms=" << hr.ms_total
+                      << "(t" << hr.ms_track << "/d" << hr.ms_detect
+                      << "/r" << hr.ms_reid << ")"
+                      << " oct=";
+            for (std::size_t o = 0; o < hr.octave_histogram.size(); ++o)
+                std::cout << (o ? "," : "") << hr.octave_histogram[o];
+            std::cout << std::endl;
         }
     }
 

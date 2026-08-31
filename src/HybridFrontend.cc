@@ -311,18 +311,29 @@ std::vector<cv::KeyPoint> detect_multiscale_shi_tomasi(
         const float s = std::pow(sf, static_cast<float>(lvl));
         std::vector<cv::KeyPoint> cands;
         std::vector<cv::KeyPoint> near_kps, far_kps;
-        for (int y = edge; y < h - edge; ++y) {
-            const float* lrow = lam.ptr<float>(y);
-            const float* drow = dil.ptr<float>(y);
-            const std::uint8_t* mrow = lmask.ptr<std::uint8_t>(y);
-            for (int x = edge; x < w - edge; ++x) {
-                if (mrow[x] == 0) continue;
-                if (lrow[x] < drow[x] || lrow[x] <= thr) continue;
-                cv::KeyPoint kp(static_cast<float>(x),
-                                static_cast<float>(y), 7.0f, -1.0f,
-                                lrow[x]);
-                kp.octave = lvl;
-                cands.push_back(kp);
+        // Vectorised candidate selection: peak AND above-floor AND
+        // unmasked. The scalar equivalent walked ~3M pyramid pixels per
+        // frame and dominated the detect budget.
+        {
+            cv::Mat peak, above, sel;
+            cv::compare(lam, dil, peak, cv::CMP_GE);
+            cv::compare(lam, thr, above, cv::CMP_GT);
+            cv::bitwise_and(peak, above, sel);
+            cv::bitwise_and(sel, lmask, sel);
+            const cv::Rect roi(edge, edge, w - 2 * edge, h - 2 * edge);
+            cv::Mat sel_roi = sel(roi);
+            if (cv::countNonZero(sel_roi) > 0) {
+                std::vector<cv::Point> pts;
+                cv::findNonZero(sel_roi, pts);
+                cands.reserve(pts.size());
+                for (const auto& pt : pts) {
+                    const int x = pt.x + edge, y = pt.y + edge;
+                    cv::KeyPoint kp(static_cast<float>(x),
+                                    static_cast<float>(y), 7.0f, -1.0f,
+                                    lam.at<float>(y, x));
+                    kp.octave = lvl;
+                    cands.push_back(kp);
+                }
             }
         }
         const int t_l = targets[static_cast<std::size_t>(lvl)];
@@ -852,7 +863,12 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
     // ============ Step 4: Shi-Tomasi top-up + BRIEF =================
     const int deficit =
         cfg.target_active_tracks - static_cast<int>(active_tracks_.size());
-    if (deficit > 0) {
+    // Amortise the fixed detection cost: a small deficit is not worth a
+    // full pyramid pass. Purging already happened above, so the dormant
+    // buffer stays correctly bounded on skipped frames.
+    const int deficit_floor = static_cast<int>(std::lround(
+        cfg.min_deficit_fraction * cfg.target_active_tracks));
+    if (deficit > 0 && deficit >= deficit_floor) {
         // ONE cornerMinEigenVal pass per frame, shared by Step 4
         // response sampling and Step 5 local detection.
         cv::Mat eig;
@@ -1025,6 +1041,13 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
     res.dormant_buffer_size = dormant_buffer_.size();
     res.median_flow_dx = flow_dx;
     res.median_flow_dy = flow_dy;
+    res.octave_histogram.assign(
+        static_cast<std::size_t>(std::max(1, cfg.descriptor_levels)), 0);
+    for (const auto& kv : active_tracks_) {
+        const int o = kv.second.octave;
+        if (o >= 0 && o < static_cast<int>(res.octave_histogram.size()))
+            ++res.octave_histogram[static_cast<std::size_t>(o)];
+    }
     res.ms_reid = ms_since(t_mark);
     res.ms_total = ms_since(t_start);
     return res;

@@ -6,6 +6,18 @@
 //   Step 5  re-ID of new corners against the DormantTrackBuffer via
 //           SpatialDescriptorMatch (gap-scaled θ_reid, distinctiveness
 //           margin, unique candidates)
+//
+// Dependencies: OpenCV (core, imgproc, video, features2d, calib3d) and
+// the two sibling modules. NO ORB-SLAM3 dependency — this class is the
+// engine; Tracking.cc integration is a thin caller (see
+// TRACKING_INTEGRATION.md).
+//
+// Faithful-port notes: semantics follow hybrid_frontend.py exactly,
+// including step ordering (purge → KLT/FB/RANSAC → motion-compensate
+// dormant → deaths buffered flow-adjusted → top-up → re-ID under a
+// deficit budget with resurrections first). Python's diagnostics-only
+// instrumentation (per-query candidate counts, drift histograms) is not
+// ported; per-frame counts and events are.
 
 #pragma once
 
@@ -58,6 +70,22 @@ struct HybridConfig {
     // descriptor_scale_factor / descriptor_levels so the detection
     // pyramid and cv::ORB's description pyramid can never disagree.
     bool multiscale_detection = true;
+    // Amortisation. MINIMUM DEFICIT, as a fraction of N_target, that
+    // must accumulate before Step 4/5 runs at all. Detection is a fixed
+    // ~3x single-scale pyramid cost regardless of how few corners are
+    // wanted, so topping up 130 corners costs the same as topping up
+    // 900; letting a deficit accumulate amortises that.
+    //   0.00 -> detect whenever there is ANY deficit (default; this is
+    //           the measured, PoC-faithful behaviour)
+    //   0.10 -> detect once active has sagged to 90% of N_target,
+    //           i.e. roughly every 2-3 frames in steady state
+    // The value is the DEFICIT fraction, not the retained fraction:
+    // 0.90 would mean "wait until 90% of tracks are gone", which is
+    // almost certainly not what you want.
+    // NOTE: skipped frames also skip re-ID. With dormant_horizon_frames
+    // = 10 an entry still gets several chances, but set this to 0 for
+    // any run whose re-ID recall you intend to report.
+    double min_deficit_fraction = 0.0;
 
     // Step 5 — re-ID
     // §8 REVISED values. θ_eff(g) = min(θ_cap, θ_base + β·g); note that
@@ -133,6 +161,10 @@ struct FrameResult {
     double ms_detect = 0.0;   // Step 4 detection + BRIEF
     double ms_reid = 0.0;     // Step 5 queries, matching, spawning
     double ms_total = 0.0;
+    // Active tracks per octave at end of frame (size = descriptor_levels).
+    // Direct evidence the octave rule is live, and the §12.6 standoff
+    // distribution: all-zero here means single-scale detection.
+    std::vector<int> octave_histogram;
 };
 
 // ORB-SLAM3's geometric per-level feature allocation (lower levels get

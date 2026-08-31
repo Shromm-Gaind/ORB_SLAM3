@@ -120,6 +120,7 @@ namespace ORB_SLAM3 {
         bool  hybridEnableReid() const { return hybridEnableReid_; }
         bool  hybridUseRepDesc() const { return hybridUseRepDesc_; }
         bool hybridMultiscale() const { return hybridMultiscale_; }
+        float hybridMinDeficit() const { return hybridMinDeficit_; }
 
         float keyFrameSize() {return keyFrameSize_;}
         float keyFrameLineWidth() {return keyFrameLineWidth_;}
@@ -245,6 +246,7 @@ namespace ORB_SLAM3 {
         bool  hybridEnableReid_  = true;
         bool  hybridUseRepDesc_  = true;
         bool hybridMultiscale_ = true;
+        float hybridMinDeficit_ = 0.0f;
 
         /*
          * Viewer stuff
