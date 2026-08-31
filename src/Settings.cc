@@ -488,8 +488,11 @@ namespace ORB_SLAM3 {
 
         thFarPoints_ = readParameter<float>(fSettings,"System.thFarPoints",found,false);
         //hybrid shadow mode
-        hybridShadow_     = readParameter<int>(fSettings, "Hybrid.shadowMode",     found, false) != 0;
+        hybridShadow_     = readParameter<int>(fSettings, "Hybrid.shadowMode", found, false) != 0;
         if(!found) hybridShadow_ = false;
+        hybridTakeover_ = readParameter<int>(fSettings, "Hybrid.takeover", found, false) != 0;
+        if(!found) hybridTakeover_ = false;
+
         hybridHorizon_    = readParameter<int>  (fSettings, "Hybrid.dormantHorizon", found, false);
         if(!found) hybridHorizon_ = 10;
         hybridReidRadius_ = readParameter<float>(fSettings, "Hybrid.reidRadius",     found, false);
@@ -678,6 +681,7 @@ namespace ORB_SLAM3 {
         output << "\t-ORB scale factor: " << settings.scaleFactor_ << endl;
         output << "\t-ORB number of scales: " << settings.nLevels_ << endl;
         output << "\t-Hybrid shadow mode: " << (settings.hybridShadow_ ? "ON" : "OFF") << endl;
+        output << "\t-Hybrid takeover: " << (settings.hybridTakeover_ ? "ON" : "OFF") << endl;
         output << "\t-Hybrid re-ID: " << (settings.hybridEnableReid_ ? "ON" : "OFF")
                << ", horizon " << settings.hybridHorizon_ << " frames"
                << ", r_reid " << settings.hybridReidRadius_ << " px" << endl;

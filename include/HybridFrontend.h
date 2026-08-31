@@ -1,3 +1,6 @@
+// C++ port of hybrid_frontend.py: the stateful per-frame pipeline
+// implementing Steps 1-5 of the hybrid frontend (design doc §4).
+//
 //   Step 1  KLT forward tracking of active features
 //   Step 2  forward-backward consistency filter
 //   Step 3  RANSAC fundamental-matrix outlier rejection
@@ -197,6 +200,16 @@ public:
     std::uint64_t frame_index() const { return frame_index_; }
     const HybridConfig& config() const { return cfg_; }
 
+    // Stage B: fresh steered-BRIEF descriptors for every active track at
+    // its CURRENT position in the last processed frame, in ascending-id
+    // order, with kp.angle/octave/size set. This is what the Frame
+    // consumes. Tracks whose descriptor patch falls outside the image
+    // are omitted (they stay active in the frontend). Call AFTER
+    // initialize()/process_frame() for the frame in question.
+    void describe_current(std::vector<std::uint64_t>& ids,
+                          std::vector<cv::KeyPoint>& keypoints,
+                          cv::Mat& descriptors);
+
     // Attach/detach a map-point handle to a live track (Tracking.cc's
     // hook once triangulation exists; §4.1's infant→established edge).
     // Returns false if the id is not active.
@@ -219,6 +232,10 @@ private:
     bool initialized_ = false;
     std::uint64_t next_id_ = 1;
     cv::Mat prev_gray_;
+    // Unblurred pyramids for IC-angle computation; pyr_prev_ always
+    // corresponds to prev_gray_, pyr_curr_ to the frame being processed.
+    std::vector<cv::Mat> pyr_prev_, pyr_curr_;
+    std::vector<int> umax_;
     cv::Ptr<cv::ORB> orb_;
 };
 

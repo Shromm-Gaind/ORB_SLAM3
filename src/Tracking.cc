@@ -94,7 +94,7 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
         }
     }
 
-    if (settings && settings->hybridShadow()) {
+    if (settings && (settings->hybridShadow() || settings->hybridTakeover())) {
         hybrid_frontend::HybridConfig hcfg;
         hcfg.target_active_tracks   = settings->nFeatures();
         hcfg.klt_pyramid_levels     = settings->hybridKltLevels();
@@ -122,14 +122,20 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
         hcfg.min_deficit_fraction = settings->hybridMinDeficit();
         mpHybridFrontend =
             std::make_unique<hybrid_frontend::HybridFrontend>(hcfg);
-        mbHybridShadow = true;
-        std::cout << "[Hybrid] shadow mode ON (target="
+        mbHybridShadow   = settings->hybridShadow();
+        mbHybridTakeover = settings->hybridTakeover();
+        std::cout << "[Hybrid] " << (mbHybridTakeover ? "TAKEOVER" : "shadow") << " mode ON (target="
                   << hcfg.target_active_tracks << ", horizon="
                   << hcfg.dormant_horizon_frames << ", r_reid="
                   << hcfg.reid_radius_px << ", theta="
                   << hcfg.reid_hamming_threshold << "+"
                   << hcfg.reid_hamming_slope_per_frame << "/f)"
                   << std::endl;
+    }
+    if (settings && settings->hybridTakeover() && !mpHybridFrontend) {
+        std::cerr << "[Hybrid] FATAL: takeover requested but frontend not constructed"
+                  << std::endl;
+        throw std::runtime_error("Hybrid takeover without frontend");
     }
 
     initID = 0; lastID = 0;
@@ -1539,7 +1545,7 @@ Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat 
         }
     }
 
-    if (mbHybridShadow && mpHybridFrontend) {
+    if (mpHybridFrontend) {
         if (mpHybridFrontend->frame_index() == 0 &&
             mpHybridFrontend->active_tracks().empty()) {
             mpHybridFrontend->initialize(mImGray);
@@ -1571,7 +1577,20 @@ Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat 
     //cout << "Incoming frame creation" << endl;
 
     if (mSensor == System::STEREO && !mpCamera2)
-        mCurrentFrame = Frame(mImGray,imGrayRight,timestamp,mpORBextractorLeft,mpORBextractorRight,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera);
+    {
+        if (mbHybridTakeover && mpHybridFrontend)
+        {
+            std::vector<cv::KeyPoint> vKeys;
+            cv::Mat desc;
+            std::vector<std::uint64_t> vIds;
+            HybridFrameInputs(vKeys, desc, vIds);
+            mCurrentFrame = Frame(mImGray, imGrayRight, vKeys, desc, vIds, timestamp,
+                                  mpORBextractorLeft, mpORBextractorRight, mpORBVocabulary,
+                                  mK, mDistCoef, mbf, mThDepth, mpCamera);
+        }
+        else
+            mCurrentFrame = Frame(mImGray,imGrayRight,timestamp,mpORBextractorLeft,mpORBextractorRight,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera);
+    }
     else if(mSensor == System::STEREO && mpCamera2)
         mCurrentFrame = Frame(mImGray,imGrayRight,timestamp,mpORBextractorLeft,mpORBextractorRight,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,mpCamera2,mTlr);
     else if(mSensor == System::IMU_STEREO && !mpCamera2)
@@ -1591,6 +1610,12 @@ Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat 
 
     //cout << "Tracking start" << endl;
     Track();
+    if (mbHybridTakeover)
+    std::cout << "[HybridTrack] f=" << mpHybridFrontend->frame_index()
+              << " idmatch=" << mnHybridIdMatches
+              << " tlm=" << mnMatchesInliers
+              << " N=" << mCurrentFrame.N
+              << " state=" << mState << std::endl;
     //cout << "Tracking end" << endl;
 
     return mCurrentFrame.GetPose();
@@ -2030,7 +2055,7 @@ void Tracking::Track()
                 else
                 {
                     Verbose::PrintMess("TRACK: Track with motion model", Verbose::VERBOSITY_DEBUG);
-                    bOK = TrackWithMotionModel();
+                    bOK = (mbHybridTakeover ? HybridTrackWithMotionModel() : TrackWithMotionModel());
                     if(!bOK)
                         bOK = TrackReferenceKeyFrame();
                 }
@@ -2129,7 +2154,7 @@ void Tracking::Track()
                     // In last frame we tracked enough MapPoints in the map
                     if(mbVelocity)
                     {
-                        bOK = TrackWithMotionModel();
+                        bOK = (mbHybridTakeover ? HybridTrackWithMotionModel() : TrackWithMotionModel());
                     }
                     else
                     {
@@ -2151,7 +2176,7 @@ void Tracking::Track()
                     Sophus::SE3f TcwMM;
                     if(mbVelocity)
                     {
-                        bOKMM = TrackWithMotionModel();
+                        bOKMM = (mbHybridTakeover ? HybridTrackWithMotionModel() : TrackWithMotionModel());
                         vpMPsMM = mCurrentFrame.mvpMapPoints;
                         vbOutMM = mCurrentFrame.mvbOutlier;
                         TcwMM = mCurrentFrame.GetPose();

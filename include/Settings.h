@@ -103,6 +103,7 @@ namespace ORB_SLAM3 {
         // Hybrid Frontend specific 
         bool useShiTomasi() {return useShiTomasi_;}   // HYBRID FRONTEND
         bool hybridShadow() const { return hybridShadow_; } // hybrid shadow mode
+        bool hybridTakeover() const { return hybridTakeover_; }
 
         int   hybridHorizon()    const { return hybridHorizon_; }
         float hybridReidRadius() const { return hybridReidRadius_; }
@@ -229,7 +230,8 @@ namespace ORB_SLAM3 {
         int initThFAST_, minThFAST_;
         bool useShiTomasi_ = true;   // HYBRID FRONTEND: detector switch
         bool hybridShadow_ = false; //hybrid shadow: runs alongside stock algo
-        
+        bool hybridTakeover_ = false;
+
         int   hybridHorizon_     = 10;
         float hybridReidRadius_  = 10.0f;
         int   hybridThetaBase_   = 63;

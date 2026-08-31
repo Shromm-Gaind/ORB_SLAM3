@@ -267,7 +267,8 @@ std::vector<cv::Mat> build_pyramid(const cv::Mat& gray, float scale_factor,
 // reference does; the resulting cell skew is part of the validated
 // selection behaviour and is preserved deliberately.
 std::vector<cv::KeyPoint> detect_multiscale_shi_tomasi(
-        const cv::Mat& gray, const cv::Mat& level0_eig,
+        const cv::Mat& gray, const std::vector<cv::Mat>& pyr,
+        const cv::Mat& level0_eig,
         const cv::Mat& mask, int target_n, const HybridConfig& cfg,
         const cv::Mat* priority_map) {
     const float sf = cfg.descriptor_scale_factor;
@@ -276,7 +277,7 @@ std::vector<cv::KeyPoint> detect_multiscale_shi_tomasi(
     const int nms_r = std::max(1, cfg.shi_tomasi_min_distance / 2);
     const int block = cfg.shi_tomasi_block_size;
 
-    const auto pyr = build_pyramid(gray, sf, nlevels, edge);
+    (void)gray;   // level 0 is pyr[0]
     const auto targets = level_target_counts(target_n, nlevels,
                                              static_cast<double>(sf));
     std::vector<cv::KeyPoint> all;
@@ -443,10 +444,88 @@ std::vector<cv::KeyPoint> detect_shi_tomasi_with_quadtree(
 
 // ---- steered BRIEF at caller-provided positions --------------------
 
+// ---- intensity-centroid orientation (ORB-SLAM3 IC_Angle) ------------
+// cv::ORB::compute with USER-PROVIDED keypoints does NOT compute
+// orientation: it uses whatever kp.angle already holds. With the default
+// -1 every descriptor this frontend produced was effectively unsteered.
+// Harmless while frontend descriptors were only compared with each other
+// (re-ID), fatal once they meet ORBextractor's steered descriptors in
+// ComputeStereoMatches. This is the same IC angle ORBextractor computes,
+// on the same unblurred pyramid level, so the two are now comparable.
+
+constexpr int kHalfPatch = 15;
+
+std::vector<int> make_umax() {
+    std::vector<int> umax(kHalfPatch + 1);
+    const int vmax = static_cast<int>(std::floor(
+        kHalfPatch * std::sqrt(2.0) / 2 + 1));
+    const int vmin = static_cast<int>(std::ceil(
+        kHalfPatch * std::sqrt(2.0) / 2));
+    const double hp2 = static_cast<double>(kHalfPatch) * kHalfPatch;
+    for (int v = 0; v <= vmax; ++v)
+        umax[static_cast<std::size_t>(v)] = static_cast<int>(
+            std::lround(std::sqrt(hp2 - static_cast<double>(v) * v)));
+    for (int v = kHalfPatch, v0 = 0; v >= vmin; --v) {
+        while (umax[static_cast<std::size_t>(v0)] ==
+               umax[static_cast<std::size_t>(v0 + 1)])
+            ++v0;
+        umax[static_cast<std::size_t>(v)] = v0;
+        ++v0;
+    }
+    return umax;
+}
+
+// Angle in degrees at an integer pixel of a level image; caller
+// guarantees the (2*kHalfPatch+1)^2 patch is inside the image.
+float ic_angle(const cv::Mat& img, int cx, int cy,
+               const std::vector<int>& umax) {
+    int m_01 = 0, m_10 = 0;
+    const std::uint8_t* center = img.ptr<std::uint8_t>(cy) + cx;
+    for (int u = -kHalfPatch; u <= kHalfPatch; ++u)
+        m_10 += u * center[u];
+    const int step = static_cast<int>(img.step1());
+    for (int v = 1; v <= kHalfPatch; ++v) {
+        int v_sum = 0;
+        const int d = umax[static_cast<std::size_t>(v)];
+        for (int u = -d; u <= d; ++u) {
+            const int val_plus = center[u + v * step];
+            const int val_minus = center[u - v * step];
+            v_sum += (val_plus - val_minus);
+            m_10 += u * (val_plus + val_minus);
+        }
+        m_01 += v * v_sum;
+    }
+    return cv::fastAtan2(static_cast<float>(m_01),
+                         static_cast<float>(m_10));
+}
+
+// Stamp kp.angle for every keypoint from the pyramid level named by its
+// octave. Keypoints whose patch leaves the level image keep angle=-1,
+// and are then dropped by ORB.compute's own border filter anyway.
+void assign_ic_angles(std::vector<cv::KeyPoint>& kps,
+                      const std::vector<cv::Mat>& pyr, float scale_factor,
+                      const std::vector<int>& umax) {
+    for (auto& kp : kps) {
+        const int lvl = kp.octave;
+        if (lvl < 0 || lvl >= static_cast<int>(pyr.size())) continue;
+        const cv::Mat& img = pyr[static_cast<std::size_t>(lvl)];
+        const float inv = 1.0f / std::pow(scale_factor,
+                                          static_cast<float>(lvl));
+        const int cx = static_cast<int>(std::lround(kp.pt.x * inv));
+        const int cy = static_cast<int>(std::lround(kp.pt.y * inv));
+        if (cx - kHalfPatch < 0 || cy - kHalfPatch < 0 ||
+            cx + kHalfPatch >= img.cols || cy + kHalfPatch >= img.rows)
+            continue;
+        kp.angle = ic_angle(img, cx, cy, umax);
+    }
+}
+
 void compute_steered_brief(const cv::Mat& gray,
                            std::vector<cv::KeyPoint>& kps,
                            cv::Ptr<cv::ORB>& orb, int patch_size,
                            float scale_factor,
+                           const std::vector<cv::Mat>& pyr,
+                           const std::vector<int>& umax,
                            std::vector<cv::KeyPoint>& kept,
                            cv::Mat& desc) {
     kept.clear();
@@ -458,6 +537,7 @@ void compute_steered_brief(const cv::Mat& gray,
     for (auto& kp : kps)
         kp.size = static_cast<float>(patch_size) *
                   std::pow(scale_factor, static_cast<float>(kp.octave));
+    assign_ic_angles(kps, pyr, scale_factor, umax);
     orb->compute(gray, kps, desc);
     kept = kps;   // OpenCV drops border keypoints from the vector itself
     if (desc.empty()) kept.clear();
@@ -468,7 +548,8 @@ void compute_steered_brief(const cv::Mat& gray,
 std::unordered_map<int, Descriptor256> descriptors_at_positions(
         const cv::Mat& gray, const std::vector<cv::Point2f>& xy,
         const std::vector<int>& octaves,
-        cv::Ptr<cv::ORB>& orb, int patch_size, float scale_factor) {
+        cv::Ptr<cv::ORB>& orb, int patch_size, float scale_factor,
+        const std::vector<cv::Mat>& pyr, const std::vector<int>& umax) {
     std::unordered_map<int, Descriptor256> out;
     if (xy.empty()) return out;
     assert(octaves.size() == xy.size());
@@ -483,6 +564,7 @@ std::unordered_map<int, Descriptor256> descriptors_at_positions(
         kp.class_id = static_cast<int>(i);
         kps.push_back(kp);
     }
+    assign_ic_angles(kps, pyr, scale_factor, umax);
     cv::Mat desc;
     orb->compute(gray, kps, desc);
     if (desc.empty()) return out;
@@ -615,6 +697,7 @@ HybridFrontend::HybridFrontend(const HybridConfig& cfg)
                            /*firstLevel=*/0, /*WTA_K=*/2,
                            cv::ORB::HARRIS_SCORE,
                            /*patchSize=*/cfg_.descriptor_patch_size);
+    umax_ = make_umax();
 }
 
 void HybridFrontend::initialize(const cv::Mat& first_gray) {
@@ -625,11 +708,15 @@ void HybridFrontend::initialize(const cv::Mat& first_gray) {
     active_order_.clear();
     dormant_buffer_.clear();
     cv::Mat full_mask(first_gray.size(), CV_8U, cv::Scalar(255));
+    pyr_prev_ = build_pyramid(first_gray, cfg_.descriptor_scale_factor,
+                              std::max(1, cfg_.descriptor_levels),
+                              cfg_.descriptor_patch_size / 2);
     cv::Mat eig;
     cv::cornerMinEigenVal(first_gray, eig, cfg_.shi_tomasi_block_size);
     std::vector<cv::KeyPoint> kps;
     if (cfg_.multiscale_detection)
-        kps = detect_multiscale_shi_tomasi(first_gray, eig, full_mask,
+        kps = detect_multiscale_shi_tomasi(first_gray, pyr_prev_, eig,
+                                           full_mask,
                                            cfg_.target_active_tracks,
                                            cfg_, nullptr);
     else
@@ -642,7 +729,8 @@ void HybridFrontend::initialize(const cv::Mat& first_gray) {
     cv::Mat desc;
     compute_steered_brief(first_gray, kps, orb_,
                           cfg_.descriptor_patch_size,
-                          cfg_.descriptor_scale_factor, kept, desc);
+                          cfg_.descriptor_scale_factor, pyr_prev_, umax_,
+                          kept, desc);
     for (int i = 0; i < static_cast<int>(kept.size()); ++i)
         spawn_track(kept[static_cast<std::size_t>(i)].pt.x,
                     kept[static_cast<std::size_t>(i)].pt.y,
@@ -663,6 +751,12 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
     // Purge every frame — purging only when Step 4 fires lets the
     // buffer grow unboundedly whenever the active set stays at target.
     dormant_buffer_.purge_older_than(frame_index_);
+
+    // One pyramid per frame: orientation for every descriptor computed
+    // on this frame, and Step 4 detection, all read from it.
+    pyr_curr_ = build_pyramid(curr_gray, cfg.descriptor_scale_factor,
+                              std::max(1, cfg.descriptor_levels),
+                              cfg.descriptor_patch_size / 2);
 
     FrameResult res;
     res.frame_index = frame_index_;
@@ -701,7 +795,16 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
             const float dy = prev_pts[i].y - back_pts[i].y;
             const bool fb_ok =
                 std::sqrt(dx * dx + dy * dy) < cfg.fb_threshold_px;
-            surv[i] = klt_ok && fb_ok;
+            // KLT can report status=1 for a point that has drifted
+            // just outside the image. Downstream consumers (Frame's
+            // stereo matcher indexes rows by pt.y unchecked) cannot
+            // tolerate that, and neither can any descriptor step, so
+            // an off-image track is dead.
+            const bool inside =
+                curr_pts[i].x >= 0.0f && curr_pts[i].y >= 0.0f &&
+                curr_pts[i].x < static_cast<float>(curr_gray.cols) &&
+                curr_pts[i].y < static_cast<float>(curr_gray.rows);
+            surv[i] = klt_ok && fb_ok && inside;
             if (surv[i]) ++n_fb;
         }
         res.tracks_after_klt = n_klt;
@@ -772,7 +875,7 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
             }
             auto fresh = descriptors_at_positions(
                 curr_gray, pos, oct, orb_, cfg.descriptor_patch_size,
-                cfg.descriptor_scale_factor);
+                cfg.descriptor_scale_factor, pyr_curr_, umax_);
             for (const auto& kv : fresh) {
                 ActiveTrack& t = active_tracks_.at(
                     sampled[static_cast<std::size_t>(kv.first)]);
@@ -819,7 +922,7 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
             }
             auto desc_by_pos = descriptors_at_positions(
                 prev_gray_, dpos, doct, orb_, cfg.descriptor_patch_size,
-                cfg.descriptor_scale_factor);
+                cfg.descriptor_scale_factor, pyr_prev_, umax_);
             std::unordered_map<std::size_t, Descriptor256> death_desc;
             for (const auto& kv : desc_by_pos)
                 death_desc[dmap[static_cast<std::size_t>(kv.first)]] = kv.second;
@@ -892,8 +995,8 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
         }
         std::vector<cv::KeyPoint> kps;
         if (cfg.multiscale_detection)
-            kps = detect_multiscale_shi_tomasi(curr_gray, eig, mask,
-                                               deficit, cfg,
+            kps = detect_multiscale_shi_tomasi(curr_gray, pyr_curr_, eig,
+                                               mask, deficit, cfg,
                                                priority_ptr);
         else
             kps = detect_shi_tomasi_with_quadtree(
@@ -904,7 +1007,8 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
         cv::Mat desc;
         compute_steered_brief(curr_gray, kps, orb_,
                               cfg.descriptor_patch_size,
-                              cfg.descriptor_scale_factor, kept, desc);
+                              cfg.descriptor_scale_factor, pyr_curr_, umax_,
+                              kept, desc);
         res.new_corners_detected = static_cast<int>(kept.size());
 
         res.ms_detect = ms_since(t_mark);
@@ -949,6 +1053,7 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
                     compute_steered_brief(curr_gray, lk, orb_,
                                           cfg.descriptor_patch_size,
                                           cfg.descriptor_scale_factor,
+                                          pyr_curr_, umax_,
                                           lkept, ldesc);
                     for (int j = 0; j < static_cast<int>(lkept.size()); ++j) {
                         q_xy.push_back(
@@ -1037,6 +1142,7 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
     }
 
     prev_gray_ = curr_gray.clone();
+    pyr_prev_.swap(pyr_curr_);   // pyr_prev_ now matches prev_gray_
     res.tracks_out = static_cast<int>(active_tracks_.size());
     res.dormant_buffer_size = dormant_buffer_.size();
     res.median_flow_dx = flow_dx;
@@ -1067,7 +1173,7 @@ std::vector<DeathRecord> HybridFrontend::force_kill(
     }
     auto death_desc = descriptors_at_positions(
         prev_gray_, pos, oct, orb_, cfg_.descriptor_patch_size,
-        cfg_.descriptor_scale_factor);
+        cfg_.descriptor_scale_factor, pyr_prev_, umax_);
     std::vector<DeathRecord> killed;
     for (std::size_t k = 0; k < victims.size(); ++k) {
         const std::uint64_t tid = victims[k];
@@ -1093,6 +1199,57 @@ std::vector<DeathRecord> HybridFrontend::force_kill(
         dormant_buffer_.add(d);
     }
     return killed;
+}
+
+void HybridFrontend::describe_current(std::vector<std::uint64_t>& ids,
+                                      std::vector<cv::KeyPoint>& keypoints,
+                                      cv::Mat& descriptors) {
+    ids.clear();
+    keypoints.clear();
+    descriptors.release();
+    if (!initialized_ || active_tracks_.empty()) return;
+
+    // Deterministic order: ascending id.
+    std::vector<std::uint64_t> order;
+    order.reserve(active_tracks_.size());
+    for (const auto& kv : active_tracks_) order.push_back(kv.first);
+    std::sort(order.begin(), order.end());
+
+    // Fresh descriptors at CURRENT positions in the LAST PROCESSED frame
+    // (prev_gray_ / pyr_prev_ after process_frame has run). This is what
+    // stock ORB-SLAM3 does every frame; a birth-time or medoid
+    // descriptor at a position the track occupied frames ago is the
+    // wrong thing to hand to stereo matching or the local map.
+    std::vector<cv::KeyPoint> kps;
+    kps.reserve(order.size());
+    for (std::size_t i = 0; i < order.size(); ++i) {
+        const ActiveTrack& t = active_tracks_.at(order[i]);
+        if (t.x < 0.0f || t.y < 0.0f ||
+            t.x >= static_cast<float>(prev_gray_.cols) ||
+            t.y >= static_cast<float>(prev_gray_.rows))
+            continue;
+        cv::KeyPoint kp(t.x, t.y,
+                        static_cast<float>(cfg_.descriptor_patch_size) *
+                            std::pow(cfg_.descriptor_scale_factor,
+                                     static_cast<float>(t.octave)));
+        kp.octave = t.octave;
+        kp.class_id = static_cast<int>(i);
+        kps.push_back(kp);
+    }
+    assign_ic_angles(kps, pyr_prev_, cfg_.descriptor_scale_factor, umax_);
+    cv::Mat desc;
+    orb_->compute(prev_gray_, kps, desc);   // drops border keypoints
+    if (desc.empty()) return;
+
+    ids.reserve(kps.size());
+    keypoints.reserve(kps.size());
+    for (std::size_t r = 0; r < kps.size(); ++r) {
+        const int src = kps[r].class_id;
+        if (src < 0 || src >= static_cast<int>(order.size())) continue;
+        ids.push_back(order[static_cast<std::size_t>(src)]);
+        keypoints.push_back(kps[r]);
+    }
+    descriptors = desc.clone();
 }
 
 bool HybridFrontend::set_map_point(std::uint64_t id, MapPointHandle mp) {

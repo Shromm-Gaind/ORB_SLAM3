@@ -212,6 +212,10 @@ protected:
     bool TrackReferenceKeyFrame();
     void UpdateLastFrame();
     bool TrackWithMotionModel();
+    bool HybridTrackWithMotionModel();
+    void HybridFrameInputs(std::vector<cv::KeyPoint> &vKeys,
+                           cv::Mat &descriptors,
+                           std::vector<std::uint64_t> &vTrackIds) const;
     bool PredictStateIMU();
 
     bool Relocalization();
@@ -268,6 +272,9 @@ protected:
     // logs per-frame results, drives nothing). §9.2 step 5, stage A.
     std::unique_ptr<hybrid_frontend::HybridFrontend> mpHybridFrontend;
     bool mbHybridShadow = false;
+
+    bool mbHybridTakeover = false;
+    int  mnHybridIdMatches = 0;   // diagnostics, set per frame
 
     //BoW
     ORBVocabulary* mpORBVocabulary;

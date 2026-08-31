@@ -34,6 +34,7 @@
 #include "Settings.h"
 
 #include <mutex>
+#include <cstdint>
 #include <opencv2/opencv.hpp>
 
 #include "Eigen/Core"
@@ -61,6 +62,17 @@ public:
     // Constructor for stereo cameras.
     Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeStamp, ORBextractor* extractorLeft, ORBextractor* extractorRight, ORBVocabulary* voc, cv::Mat &K, cv::Mat &distCoef, const float &bf, const float &thDepth, GeometricCamera* pCamera,Frame* pPrevF = static_cast<Frame*>(NULL), const IMU::Calib &ImuCalib = IMU::Calib());
 
+
+    // HYBRID (Stage B): left features supplied by the hybrid frontend.
+    Frame(const cv::Mat &imLeft, const cv::Mat &imRight,
+        const std::vector<cv::KeyPoint> &vHybridKeys,
+        const cv::Mat &hybridDescriptors,
+        const std::vector<std::uint64_t> &vHybridTrackIds,
+        const double &timeStamp,
+        ORBextractor* extractorLeft, ORBextractor* extractorRight,
+        ORBVocabulary* voc, cv::Mat &K, cv::Mat &distCoef,
+        const float &bf, const float &thDepth, GeometricCamera* pCamera);
+        
     // Constructor for RGB-D cameras.
     Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeStamp, ORBextractor* extractor,ORBVocabulary* voc, cv::Mat &K, cv::Mat &distCoef, const float &bf, const float &thDepth, GeometricCamera* pCamera,Frame* pPrevF = static_cast<Frame*>(NULL), const IMU::Calib &ImuCalib = IMU::Calib());
 
@@ -227,6 +239,9 @@ public:
     // In the RGB-D case, RGB images can be distorted.
     std::vector<cv::KeyPoint> mvKeys, mvKeysRight;
     std::vector<cv::KeyPoint> mvKeysUn;
+
+    // HYBRID: track id per left keypoint (0 = no id). Parallel to mvKeys.
+    std::vector<std::uint64_t> mvnTrackIds;
 
     // Corresponding stereo coordinate and depth for each keypoint.
     std::vector<MapPoint*> mvpMapPoints;

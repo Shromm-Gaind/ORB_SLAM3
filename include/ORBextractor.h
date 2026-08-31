@@ -45,6 +45,9 @@ class ORBextractor
 public:
     
     enum {HARRIS_SCORE=0, FAST_SCORE=1 };
+    // HYBRID (Stage B): FrameHybrid.cc builds the left pyramid without
+    // running detection. ~3 ms vs ~60 ms for a full extraction.
+    void ComputePyramid(cv::Mat image);
 
     // HYBRID FRONTEND (design doc §4.5.2, §9.1): when useShiTomasi is
     // true (the default), detection replaces FAST with multi-scale
@@ -94,9 +97,10 @@ public:
 
     std::vector<cv::Mat> mvImagePyramid;
 
+
+
 protected:
 
-    void ComputePyramid(cv::Mat image);
     void ComputeKeyPointsOctTree(std::vector<std::vector<cv::KeyPoint> >& allKeypoints);
     // HYBRID FRONTEND: multi-scale Shi-Tomasi detection (§4.5.2).
     // Same output contract as ComputeKeyPointsOctTree: per-level
