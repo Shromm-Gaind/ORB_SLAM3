@@ -527,6 +527,16 @@ namespace ORB_SLAM3 {
         if(!found) hybridMultiscale_ = true;
         hybridMinDeficit_ = readParameter<float>(fSettings, "Hybrid.minDeficitFraction", found, false) != 0;
         if(!found) hybridMinDeficit_ = true;
+        hybridTlmRadius_ = readParameter<float>(fSettings, "Hybrid.tlmRadius", found, false) != 0;
+        if(!found) hybridTlmRadius_ = 3.0f;
+        hybridTlmHamming_ = readParameter<int>(fSettings, "Hybrid.tlmHamming", found, false) != 0;
+        if(!found) hybridTlmHamming_ = 50;
+        hybridTlmMargin_ = readParameter<int>(fSettings, "Hybrid.tlmMargin", found, false) != 0;
+        if(!found) hybridTlmMargin_ = 0;
+        hybridTlmOctaveGate_ = readParameter<int>(fSettings, "Hybrid.tlmOctaveGate", found, false) != 0;
+        if(!found) hybridTlmOctaveGate_ = true;
+        hybridDormantRep_ = readParameter<int>(fSettings, "Hybrid.dormantStoreRepresentative", found, false) != 0;
+        if(!found) hybridDormantRep_ = false;
     }
 
     void Settings::precomputeRectificationMaps() {
@@ -698,6 +708,9 @@ namespace ORB_SLAM3 {
                 << settings.hybridMinDeficit_ << " of N_target" << endl;
         output << "\t-Detector: " << (settings.useShiTomasi_
             ? "Shi-Tomasi (hybrid frontend)" : "FAST (stock)") << endl;
+        output << "\t-Hybrid TLM: r " << settings.hybridTlmRadius_ << " px, theta "
+               << settings.hybridTlmHamming_ << ", margin " << settings.hybridTlmMargin_
+               << ", octave gate " << (settings.hybridTlmOctaveGate_ ? "ON" : "OFF") << endl;
         if(!settings.useShiTomasi_){
             output << "\t-Initial FAST threshold: " << settings.initThFAST_ << endl;
             output << "\t-Min FAST threshold: " << settings.minThFAST_ << endl;

@@ -122,6 +122,11 @@ namespace ORB_SLAM3 {
         bool  hybridUseRepDesc() const { return hybridUseRepDesc_; }
         bool hybridMultiscale() const { return hybridMultiscale_; }
         float hybridMinDeficit() const { return hybridMinDeficit_; }
+        float hybridTlmRadius()   const { return hybridTlmRadius_; }    // 3.0f
+        int   hybridTlmHamming()  const { return hybridTlmHamming_; }   // 50
+        int   hybridTlmMargin()   const { return hybridTlmMargin_; }    // 0
+        bool  hybridTlmOctaveGate() const { return hybridTlmOctaveGate_; } // true
+        bool  hybridDormantRep()  const { return hybridDormantRep_; }   // false
 
         float keyFrameSize() {return keyFrameSize_;}
         float keyFrameLineWidth() {return keyFrameLineWidth_;}
@@ -249,6 +254,11 @@ namespace ORB_SLAM3 {
         bool  hybridUseRepDesc_  = true;
         bool hybridMultiscale_ = true;
         float hybridMinDeficit_ = 0.0f;
+        float hybridTlmRadius_     = 3.0f;
+        int   hybridTlmHamming_    = 50;
+        int   hybridTlmMargin_     = 0;
+        bool  hybridTlmOctaveGate_ = true;
+        bool  hybridDormantRep_    = false;
 
         /*
          * Viewer stuff

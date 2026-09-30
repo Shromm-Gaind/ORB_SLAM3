@@ -131,6 +131,11 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
                   << hcfg.reid_hamming_threshold << "+"
                   << hcfg.reid_hamming_slope_per_frame << "/f)"
                   << std::endl;
+        hcfg.tlm_radius_px              = settings->hybridTlmRadius();
+        hcfg.tlm_hamming_threshold      = settings->hybridTlmHamming();
+        hcfg.tlm_second_best_margin     = settings->hybridTlmMargin();
+        hcfg.tlm_octave_gate            = settings->hybridTlmOctaveGate();
+        hcfg.dormant_store_representative = settings->hybridDormantRep();
     }
     if (settings && settings->hybridTakeover() && !mpHybridFrontend) {
         std::cerr << "[Hybrid] FATAL: takeover requested but frontend not constructed"
@@ -1562,6 +1567,7 @@ Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat 
                       << hr.reids_attempted
                       << " out=" << hr.tracks_out
                       << " dorm=" << hr.dormant_buffer_size
+                      << " adults=" << hr.adults_discarded
                       << " flow=(" << hr.median_flow_dx << ","
                       << hr.median_flow_dy << ")"
                       << " ms=" << hr.ms_total
@@ -1613,6 +1619,7 @@ Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat 
     if (mbHybridTakeover)
     std::cout << "[HybridTrack] f=" << mpHybridFrontend->frame_index()
               << " idmatch=" << mnHybridIdMatches
+              << " tlmH=" << mnHybridTlmMatches
               << " tlm=" << mnMatchesInliers
               << " N=" << mCurrentFrame.N
               << " state=" << mState << std::endl;
@@ -2396,6 +2403,9 @@ void Tracking::Track()
         if(!mCurrentFrame.mpReferenceKF)
             mCurrentFrame.mpReferenceKF = mpReferenceKF;
 
+        if(mbHybridTakeover)
+            SyncHybridMapPoints();
+
         mLastFrame = Frame(mCurrentFrame);
     }
 
@@ -2528,6 +2538,9 @@ void Tracking::StereoInitialization()
         //cout << "Active map: " << mpAtlas->GetCurrentMap()->GetId() << endl;
 
         mpLocalMapper->InsertKeyFrame(pKFini);
+
+        if(mbHybridTakeover)
+            SyncHybridMapPoints();
 
         mLastFrame = Frame(mCurrentFrame);
         mnLastKeyFrameId = mCurrentFrame.mnId;
@@ -2766,6 +2779,8 @@ void Tracking::CreateInitialMapMonocular()
 
 void Tracking::CreateMapInAtlas()
 {
+    ClearHybridMapPoints();
+
     mnLastInitFrameId = mCurrentFrame.mnId;
     mpAtlas->CreateNewMap();
     if (mSensor==System::IMU_STEREO || mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_RGBD)
@@ -3059,7 +3074,11 @@ bool Tracking::TrackLocalMap()
     mTrackedFr++;
 
     UpdateLocalMap();
-    SearchLocalPoints();
+
+    if(mbHybridTakeover)
+        HybridSearchLocalPoints();
+    else
+        SearchLocalPoints();
 
     // TOO check outliers before PO
     int aux1 = 0, aux2=0;
@@ -3883,6 +3902,8 @@ bool Tracking::Relocalization()
 
 void Tracking::Reset(bool bLocMap)
 {
+    ClearHybridMapPoints();
+
     Verbose::PrintMess("System Reseting", Verbose::VERBOSITY_NORMAL);
 
     if(mpViewer)
@@ -3944,6 +3965,8 @@ void Tracking::Reset(bool bLocMap)
 
 void Tracking::ResetActiveMap(bool bLocMap)
 {
+    ClearHybridMapPoints();
+
     Verbose::PrintMess("Active map Reseting", Verbose::VERBOSITY_NORMAL);
     if(mpViewer)
     {

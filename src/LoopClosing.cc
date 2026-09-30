@@ -582,7 +582,7 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                                              int &nNumCoincidences, std::vector<MapPoint*> &vpMPs, std::vector<MapPoint*> &vpMatchedMPs)
 {
     int nBoWMatches = 20;
-    int nBoWInliers = 15;
+    int nBoWInliers = 10;
     int nSim3Inliers = 20;
     int nProjMatches = 50;
     int nProjOptMatches = 80;

@@ -216,6 +216,11 @@ protected:
     void HybridFrameInputs(std::vector<cv::KeyPoint> &vKeys,
                            cv::Mat &descriptors,
                            std::vector<std::uint64_t> &vTrackIds) const;
+    void HybridSearchLocalPoints();     // §4.7 Step 5b
+    void SyncHybridMapPoints();         // §4.1 adult/infant bookkeeping
+    void ClearHybridMapPoints();        // on map reset
+    int  mnHybridTlmMatches = 0;        // diagnostics
+    
     bool PredictStateIMU();
 
     bool Relocalization();

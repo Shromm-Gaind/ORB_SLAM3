@@ -915,7 +915,7 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
             std::vector<std::size_t> dmap;   // dpos index -> dying index
             for (std::size_t k = 0; k < dying.size(); ++k) {
                 const ActiveTrack& t = active_tracks_.at(dying[k]);
-                if (t.age < min_age) continue;
+                if (t.age < min_age || t.map_point != nullptr) continue;
                 dmap.push_back(k);
                 dpos.emplace_back(t.x, t.y);
                 doct.push_back(t.octave);
@@ -934,13 +934,23 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
                     std::find(active_order_.begin(), active_order_.end(),
                               tid));
                 res.died_this_frame.push_back({tid, t.x, t.y});
+                if (t.map_point != nullptr) {
+                    // §4.1: ADULT. Its landmark persists in the local
+                    // map and Step 5b will re-acquire it there with the
+                    // multi-observation representative descriptor.
+                    // Buffering it too would let a new corner claim the
+                    // dormant entry first and come back as an orphan
+                    // track with no map point - the race §4.1 forbids.
+                    ++res.adults_discarded;
+                    continue;
+                }
                 if (t.age < min_age)
                     continue;   // retire: mostly detector noise
                 Descriptor256 stored = t.birth_descriptor;
                 const auto it = death_desc.find(k);
                 if (it != death_desc.end()) stored = it->second;
-                if (cfg.use_representative_descriptor && t.has_representative)
-                    stored = t.representative_descriptor;
+                if (cfg.dormant_store_representative && t.has_representative)
+                    stored = t.representative_descriptor;   // PoC behaviour
                 float px = t.x, py = t.y;
                 if (cfg.motion_compensate_dormant) {
                     px += flow_dx;
@@ -1182,10 +1192,12 @@ std::vector<DeathRecord> HybridFrontend::force_kill(
         active_order_.erase(
             std::find(active_order_.begin(), active_order_.end(), tid));
         killed.push_back({tid, t.x, t.y});
+        if (t.map_point != nullptr)
+            continue;   // §4.1: adults are discarded, not buffered
         Descriptor256 stored = t.birth_descriptor;
         const auto it = death_desc.find(static_cast<int>(k));
         if (it != death_desc.end()) stored = it->second;
-        if (cfg_.use_representative_descriptor && t.has_representative)
+        if (cfg_.dormant_store_representative && t.has_representative)
             stored = t.representative_descriptor;
         DormantTrack d;
         d.id = tid;
@@ -1250,6 +1262,10 @@ void HybridFrontend::describe_current(std::vector<std::uint64_t>& ids,
         keypoints.push_back(kps[r]);
     }
     descriptors = desc.clone();
+}
+
+void HybridFrontend::clear_all_map_points() {
+    for (auto& kv : active_tracks_) kv.second.map_point = nullptr;
 }
 
 bool HybridFrontend::set_map_point(std::uint64_t id, MapPointHandle mp) {

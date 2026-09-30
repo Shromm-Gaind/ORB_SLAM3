@@ -114,6 +114,24 @@ struct HybridConfig {
 
     // Targeted local detection inside dormant windows
     bool local_detect_in_dormant_windows = true;
+
+    // §5.4: what the dormant buffer stores for Step 5. The design
+    // measured the medoid as slightly WORSE than the death-time
+    // snapshot for re-ID (recall 78.6% vs 79.3%, drift p95 59 vs 57),
+    // because Step 5's gaps are 1-2 frames and the snapshot is closer
+    // to "now". The medoid is the right descriptor for wide-baseline
+    // consumers (Step 5b, loop closure) - and those read it from the
+    // MapPoint, not from here. true reproduces the Python PoC.
+    bool dormant_store_representative = false;
+
+    // §4.7 Step 5b (TrackLocalMap replacement). Consumed by
+    // Tracking::HybridSearchLocalPoints, kept here so they flow through
+    // the same yaml plumbing as everything else.
+    float tlm_radius_px = 3.0f;        // r_TLM at octave 0; ×1.2^ℓ (§8: 2-4 px)
+    int tlm_hamming_threshold = 50;    // θ_TLM (§8)
+    int tlm_second_best_margin = 0;    // δ for 5b; 0 = off
+    bool tlm_octave_gate = true;       // require |kp.octave − predicted| ≤ 1,
+                                       // as stock SearchByProjection does
     double local_detect_quality_scale = 0.3;
     int local_detect_max_windows = 400;
 
@@ -152,6 +170,12 @@ struct FrameResult {
     int new_corners_detected = 0;
     int reids_attempted = 0;
     int reids_succeeded = 0;
+    // §4.1: adult tracks (holding a map point) that died this frame.
+    // They are DISCARDED, never buffered - Step 5b re-acquires their
+    // landmark from the local map. Nonzero here proves set_map_point
+    // is being fed; zero on a long run means Tracking never told the
+    // frontend which tracks became landmarks.
+    int adults_discarded = 0;
     int tracks_out = 0;
     std::size_t dormant_buffer_size = 0;
     std::vector<DeathRecord> died_this_frame;
@@ -209,6 +233,14 @@ public:
     void describe_current(std::vector<std::uint64_t>& ids,
                           std::vector<cv::KeyPoint>& keypoints,
                           cv::Mat& descriptors);
+
+    // Detach every map-point handle (active tracks). Tracking MUST call
+    // this on Reset / ResetActiveMap / CreateMapInAtlas: MapPoint
+    // objects are freed with their map, and a stale handle here would
+    // wrongly classify a track as adult (and, if ever dereferenced,
+    // dangle). Dormant entries never carry handles (§4.1), so nothing
+    // to do there.
+    void clear_all_map_points();
 
     // Attach/detach a map-point handle to a live track (Tracking.cc's
     // hook once triangulation exists; §4.1's infant→established edge).
