@@ -1,3 +1,6 @@
+// HybridFrontend.cc — see HybridFrontend.h. Port of hybrid_frontend.py;
+// section markers below reference the Python structure.
+
 #include "HybridFrontend.h"
 
 #include <algorithm>
@@ -1236,14 +1239,24 @@ void HybridFrontend::describe_current(std::vector<std::uint64_t>& ids,
     kps.reserve(order.size());
     for (std::size_t i = 0; i < order.size(); ++i) {
         const ActiveTrack& t = active_tracks_.at(order[i]);
-        if (t.x < 0.0f || t.y < 0.0f ||
-            t.x >= static_cast<float>(prev_gray_.cols) ||
-            t.y >= static_cast<float>(prev_gray_.rows))
+        // ORB-SLAM3's stereo matcher reads an 11x11 window around the
+        // keypoint ON ITS OWN PYRAMID LEVEL with no bounds check. Stock
+        // keypoints are safe because ORBextractor keeps a 16-px margin at
+        // every level; cv::ORB's border filter only checks 15 px at level
+        // 0, which at octave 7 is ~4 px on that level - fewer than the
+        // window needs - and colRange() asserts. Enforce the extractor's
+        // margin here, scaled to the track's octave (level-7 tracks must
+        // be ~57 full-res px from the border). The track stays active; it
+        // is only left out of this frame's Frame.
+        const float sc = std::pow(cfg_.descriptor_scale_factor,
+                                  static_cast<float>(t.octave));
+        const float margin = 16.0f * sc;
+        if (t.x < margin || t.y < margin ||
+            t.x >= static_cast<float>(prev_gray_.cols) - margin ||
+            t.y >= static_cast<float>(prev_gray_.rows) - margin)
             continue;
         cv::KeyPoint kp(t.x, t.y,
-                        static_cast<float>(cfg_.descriptor_patch_size) *
-                            std::pow(cfg_.descriptor_scale_factor,
-                                     static_cast<float>(t.octave)));
+                        static_cast<float>(cfg_.descriptor_patch_size) * sc);
         kp.octave = t.octave;
         kp.class_id = static_cast<int>(i);
         kps.push_back(kp);
