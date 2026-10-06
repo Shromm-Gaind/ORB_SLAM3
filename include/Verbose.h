@@ -5,6 +5,9 @@
  * University of Zaragoza. Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of
  * Zaragoza.
  *
+ * Modifications Copyright (C) 2026 Shromm Gaind. Work done as a honours student at Griffith University
+ * Modified 2026: hybrid KLT/Shi-Tomasi front end backend is left untouched.
+ *
  * ORB-SLAM3 is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.

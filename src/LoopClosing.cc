@@ -19,6 +19,7 @@
 
 #include "LoopClosing.h"
 #include "Verbose.h"
+#include "Timing.h"
 
 #include "Sim3Solver.h"
 #include "Converter.h"
@@ -110,7 +111,13 @@ void LoopClosing::Run()
             std::chrono::steady_clock::time_point time_StartPR = std::chrono::steady_clock::now();
 #endif
 
+            const Timing::TimePoint timeStartLCDetection = Timing::Now();
+
             bool bFindedRegion = NewDetectCommonRegions();
+
+            // Not recorded when loop closing is off: the call returns immediately
+            if(mbActiveLC)
+                Timing::Add(Timing::LC_DETECTION, Timing::MsSince(timeStartLCDetection));
 
 #ifdef REGISTER_TIMES
             std::chrono::steady_clock::time_point time_EndPR = std::chrono::steady_clock::now();

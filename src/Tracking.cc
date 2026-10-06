@@ -19,6 +19,7 @@
 
 #include "Tracking.h"
 #include "Verbose.h"
+#include "Timing.h"
 
 #include "ORBmatcher.h"
 #include "FrameDrawer.h"
@@ -3370,6 +3371,9 @@ void Tracking::CreateNewKeyFrame()
 
     if(!mpLocalMapper->SetNotStop(true))
         return;
+
+    // Started after the early returns above, so only real keyframe creations are timed
+    Timing::Scope kfCreationTimer(Timing::KF_CREATION);
 
     KeyFrame* pKF = new KeyFrame(mCurrentFrame,mpAtlas->GetCurrentMap(),mpKeyFrameDB);
 

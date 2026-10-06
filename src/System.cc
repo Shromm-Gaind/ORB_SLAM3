@@ -20,11 +20,15 @@
 
 #include "System.h"
 #include "Converter.h"
+#include "Timing.h"
 #include <thread>
 #include <mutex>
 #include <cstdlib>
 #include <fstream>
 #include <streambuf>
+#include <sstream>
+#include <algorithm>
+#include <cmath>
 #include <pangolin/pangolin.h>
 #include <iomanip>
 #include <openssl/md5.h>
@@ -155,6 +159,109 @@ void Verbose::SaveLog(const std::string& filename)
 
     if(!WriteRunLog(filename))
         std::cerr << "ERROR: could not write run log to " << filename << std::endl;
+}
+
+namespace
+{
+
+// Samples recorded through Timing::Add(). Never freed, like RunLog above: the
+// mapping and loop closing threads may still be recording while the program exits.
+struct TimingData
+{
+    std::mutex mMutex;
+    std::vector<double> mvSamples[Timing::NUM_STAGES];
+    Timing::TimePoint mFirstFrameStart;
+    Timing::TimePoint mLastFrameEnd;
+};
+
+TimingData& GetTimingData()
+{
+    static TimingData* pData = new TimingData;
+    return *pData;
+}
+
+} // anonymous namespace
+
+void Timing::Add(eStage stage, double ms)
+{
+    TimingData& data = GetTimingData();
+    std::lock_guard<std::mutex> lock(data.mMutex);
+
+    if(stage == FRONT_END)
+    {
+        // Wall-clock span of the run, for the second frame rate figure
+        data.mLastFrameEnd = Now();
+        if(data.mvSamples[FRONT_END].empty())
+            data.mFirstFrameStart = data.mLastFrameEnd
+                - std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double, std::milli>(ms));
+    }
+
+    data.mvSamples[stage].push_back(ms);
+}
+
+void Timing::PrintSummary()
+{
+    static const char* const vNames[NUM_STAGES] =
+        {"Front-End Tracking", "Keyframe Creation", "Mapping Thread", "Local BA", "LC Detection"};
+
+    std::vector<double> vvSamples[NUM_STAGES];
+    double wallSeconds = 0.0;
+    {
+        TimingData& data = GetTimingData();
+        std::lock_guard<std::mutex> lock(data.mMutex);
+        for(int i=0; i<NUM_STAGES; i++)
+            vvSamples[i] = data.mvSamples[i];
+        if(!vvSamples[FRONT_END].empty())
+            wallSeconds = std::chrono::duration_cast<std::chrono::duration<double> >(data.mLastFrameEnd - data.mFirstFrameStart).count();
+    }
+
+    // Built in a string first so cout's own number formatting is left untouched
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(2);
+    ss << std::endl;
+    ss << "-------------------------- Timings (ms) --------------------------" << std::endl;
+    ss << std::left << std::setw(20) << "" << std::right
+       << std::setw(10) << "mean" << std::setw(10) << "median" << std::setw(10) << "std" << std::setw(10) << "samples" << std::endl;
+
+    double meanFrontEnd = 0.0;
+    for(int i=0; i<NUM_STAGES; i++)
+    {
+        std::vector<double>& v = vvSamples[i];
+        ss << std::left << std::setw(20) << vNames[i] << std::right;
+        if(v.empty())
+        {
+            ss << std::setw(10) << "-" << std::setw(10) << "-" << std::setw(10) << "-" << std::setw(10) << 0 << std::endl;
+            continue;
+        }
+
+        double sum = 0.0;
+        for(size_t j=0; j<v.size(); j++)
+            sum += v[j];
+        const double mean = sum / v.size();
+
+        double sqSum = 0.0;
+        for(size_t j=0; j<v.size(); j++)
+            sqSum += (v[j] - mean) * (v[j] - mean);
+        const double stdDev = v.size() > 1 ? std::sqrt(sqSum / (v.size() - 1)) : 0.0;
+
+        std::sort(v.begin(), v.end());
+        const double median = (v.size() % 2 == 1) ? v[v.size()/2] : 0.5 * (v[v.size()/2 - 1] + v[v.size()/2]);
+
+        ss << std::setw(10) << mean << std::setw(10) << median << std::setw(10) << stdDev << std::setw(10) << v.size() << std::endl;
+
+        if(i == FRONT_END)
+            meanFrontEnd = mean;
+    }
+    ss << "------------------------------------------------------------------" << std::endl;
+
+    const size_t nFrames = vvSamples[FRONT_END].size();
+    if(nFrames > 0 && meanFrontEnd > 0.0)
+        ss << "FPS, processing (1000 / mean front-end time):       " << 1000.0 / meanFrontEnd << std::endl;
+    if(nFrames > 1 && wallSeconds > 0.0)
+        ss << "FPS, wall clock (includes waiting between frames):  " << nFrames / wallSeconds << std::endl;
+    ss << std::endl;
+
+    std::cout << ss.str() << std::flush;
 }
 
 System::System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor,
@@ -395,6 +502,9 @@ Sophus::SE3f System::TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, 
         exit(-1);
     }
 
+    // Front-end time for this frame: from here to the end of this function
+    Timing::Scope frontEndTimer(Timing::FRONT_END);
+
     cv::Mat imLeftToFeed, imRightToFeed;
     if(settings_ && settings_->needToRectify()){
         cv::Mat M1l = settings_->M1l();
@@ -479,6 +589,9 @@ Sophus::SE3f System::TrackRGBD(const cv::Mat &im, const cv::Mat &depthmap, const
         exit(-1);
     }
 
+    // Front-end time for this frame: from here to the end of this function
+    Timing::Scope frontEndTimer(Timing::FRONT_END);
+
     cv::Mat imToFeed = im.clone();
     cv::Mat imDepthToFeed = depthmap.clone();
     if(settings_ && settings_->needToResize()){
@@ -556,6 +669,9 @@ Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp, 
         cerr << "ERROR: you called TrackMonocular but input sensor was not set to Monocular nor Monocular-Inertial." << endl;
         exit(-1);
     }
+
+    // Front-end time for this frame: from here to the end of this function
+    Timing::Scope frontEndTimer(Timing::FRONT_END);
 
     cv::Mat imToFeed = im.clone();
     if(settings_ && settings_->needToResize()){
@@ -703,6 +819,9 @@ void System::Shutdown()
 #ifdef REGISTER_TIMES
     mpTracker->PrintTimeStats();
 #endif
+
+    // Timing table and frame rate for this run
+    Timing::PrintSummary();
 
     // Save everything printed during the run (rewritten at exit to pick up later output)
     Verbose::SaveLog("run.log");
