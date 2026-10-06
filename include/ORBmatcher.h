@@ -68,6 +68,12 @@ namespace ORB_SLAM3
         int SearchByBoW(KeyFrame *pKF, Frame &F, std::vector<MapPoint*> &vpMapPointMatches);
         int SearchByBoW(KeyFrame *pKF1, KeyFrame* pKF2, std::vector<MapPoint*> &vpMatches12);
 
+        // Loop-closure verification without the vocabulary-node restriction:
+        // same contract and acceptance rules as SearchByBoW(KeyFrame*,KeyFrame*),
+        // but every map-pointed keypoint of pKF1 is compared with every one of
+        // pKF2. Defined in src/ORBmatcherBruteForce.cc.
+        int SearchBruteForce(KeyFrame* pKF1, KeyFrame* pKF2, std::vector<MapPoint*>& vpMatches12);
+
         // Matching for the Map Initialization (only used in the monocular case)
         int SearchForInitialization(Frame &F1, Frame &F2, std::vector<cv::Point2f> &vbPrevMatched, std::vector<int> &vnMatches12, int windowSize=10);
 

@@ -105,6 +105,15 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
         activeLC = static_cast<int>(fsSettings["loopClosing"]) != 0;
     }
 
+    bool bruteForceLC = false;
+    node = fsSettings["LoopClosing.bruteForce"];
+    if(!node.empty() && node.isInt())
+        bruteForceLC = node.operator int() != 0;
+
+    std::cout << "Loop closing: active = " << (activeLC ? "yes" : "no")
+              << ", candidate matching = " << (bruteForceLC ? "BRUTE FORCE" : "SearchByBoW")
+              << std::endl;
+
     mStrVocabularyFilePath = strVocFile;
 
     bool loadedAtlas = false;
@@ -211,6 +220,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     //Initialize the Loop Closing thread and launch
     // mSensor!=MONOCULAR && mSensor!=IMU_MONOCULAR
     mpLoopCloser = new LoopClosing(mpAtlas, mpKeyFrameDatabase, mpVocabulary, mSensor!=MONOCULAR, activeLC); // mSensor!=MONOCULAR);
+    mpLoopCloser->SetBruteForceMatching(bruteForceLC);    // added
     mptLoopClosing = new thread(&ORB_SLAM3::LoopClosing::Run, mpLoopCloser);
 
     //Set pointers between threads

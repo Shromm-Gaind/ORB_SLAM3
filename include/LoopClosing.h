@@ -77,7 +77,9 @@ public:
         unique_lock<std::mutex> lock(mMutexGBA);
         return mbFinishedGBA;
     }   
-
+    void SetBruteForceMatching(bool b) { mbBruteForceLC = b; }
+    bool mbBruteForceLC = false;
+    
     void RequestFinish();
 
     bool isFinished();

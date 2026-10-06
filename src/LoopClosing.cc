@@ -662,7 +662,9 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
             if(!vpCovKFi[j] || vpCovKFi[j]->isBad())
                 continue;
 
-            int num = matcherBoW.SearchByBoW(mpCurrentKF, vpCovKFi[j], vvpMatchedMPs[j]);
+            int num = mbBruteForceLC
+                    ? matcherBoW.SearchBruteForce(mpCurrentKF, vpCovKFi[j], vvpMatchedMPs[j])
+                    : matcherBoW.SearchByBoW   (mpCurrentKF, vpCovKFi[j], vvpMatchedMPs[j]);
             if (num > nMostBoWNumMatches)
             {
                 nMostBoWNumMatches = num;
