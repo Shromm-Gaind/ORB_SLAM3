@@ -18,6 +18,7 @@
 
 
 #include "Tracking.h"
+#include "Verbose.h"
 
 #include "ORBmatcher.h"
 #include "FrameDrawer.h"
@@ -124,13 +125,14 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
             std::make_unique<hybrid_frontend::HybridFrontend>(hcfg);
         mbHybridShadow   = settings->hybridShadow();
         mbHybridTakeover = settings->hybridTakeover();
-        std::cout << "[Hybrid] " << (mbHybridTakeover ? "TAKEOVER" : "shadow") << " mode ON (target="
-                  << hcfg.target_active_tracks << ", horizon="
-                  << hcfg.dormant_horizon_frames << ", r_reid="
-                  << hcfg.reid_radius_px << ", theta="
-                  << hcfg.reid_hamming_threshold << "+"
-                  << hcfg.reid_hamming_slope_per_frame << "/f)"
-                  << std::endl;
+        if (Verbose::on)
+            std::cout << "[Hybrid] " << (mbHybridTakeover ? "TAKEOVER" : "shadow") << " mode ON (target="
+                      << hcfg.target_active_tracks << ", horizon="
+                      << hcfg.dormant_horizon_frames << ", r_reid="
+                      << hcfg.reid_radius_px << ", theta="
+                      << hcfg.reid_hamming_threshold << "+"
+                      << hcfg.reid_hamming_slope_per_frame << "/f)"
+                      << std::endl;
         hcfg.tlm_radius_px              = settings->hybridTlmRadius();
         hcfg.tlm_hamming_threshold      = settings->hybridTlmHamming();
         hcfg.tlm_second_best_margin     = settings->hybridTlmMargin();
@@ -148,21 +150,21 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
     mnNumDataset = 0;
 
     vector<GeometricCamera*> vpCams = mpAtlas->GetAllCameras();
-    std::cout << "There are " << vpCams.size() << " cameras in the atlas" << std::endl;
+    if (Verbose::on) std::cout << "There are " << vpCams.size() << " cameras in the atlas" << std::endl;
     for(GeometricCamera* pCam : vpCams)
     {
-        std::cout << "Camera " << pCam->GetId();
+        if (Verbose::on) std::cout << "Camera " << pCam->GetId();
         if(pCam->GetType() == GeometricCamera::CAM_PINHOLE)
         {
-            std::cout << " is pinhole" << std::endl;
+            if (Verbose::on) std::cout << " is pinhole" << std::endl;
         }
         else if(pCam->GetType() == GeometricCamera::CAM_FISHEYE)
         {
-            std::cout << " is fisheye" << std::endl;
+            if (Verbose::on) std::cout << " is fisheye" << std::endl;
         }
         else
         {
-            std::cout << " is unknown" << std::endl;
+            if (Verbose::on) std::cout << " is unknown" << std::endl;
         }
     }
 
@@ -320,12 +322,12 @@ void Tracking::PrintTimeStats()
     f.open("ExecMean.txt");
     f << fixed;
     //Report the mean and std of each one
-    std::cout << std::endl << " TIME STATS in ms (mean$\\pm$std)" << std::endl;
+    if (Verbose::on) std::cout << std::endl << " TIME STATS in ms (mean$\\pm$std)" << std::endl;
     f << " TIME STATS in ms (mean$\\pm$std)" << std::endl;
-    cout << "OpenCV version: " << CV_VERSION << endl;
+    if (Verbose::on) cout << "OpenCV version: " << CV_VERSION << endl;
     f << "OpenCV version: " << CV_VERSION << endl;
-    std::cout << "---------------------------" << std::endl;
-    std::cout << "Tracking" << std::setprecision(5) << std::endl << std::endl;
+    if (Verbose::on) std::cout << "---------------------------" << std::endl;
+    if (Verbose::on) std::cout << "Tracking" << std::setprecision(5) << std::endl << std::endl;
     f << "---------------------------" << std::endl;
     f << "Tracking" << std::setprecision(5) << std::endl << std::endl;
     double average, deviation;
@@ -333,7 +335,7 @@ void Tracking::PrintTimeStats()
     {
         average = calcAverage(vdRectStereo_ms);
         deviation = calcDeviation(vdRectStereo_ms, average);
-        std::cout << "Stereo Rectification: " << average << "$\\pm$" << deviation << std::endl;
+        if (Verbose::on) std::cout << "Stereo Rectification: " << average << "$\\pm$" << deviation << std::endl;
         f << "Stereo Rectification: " << average << "$\\pm$" << deviation << std::endl;
     }
 
@@ -341,20 +343,20 @@ void Tracking::PrintTimeStats()
     {
         average = calcAverage(vdResizeImage_ms);
         deviation = calcDeviation(vdResizeImage_ms, average);
-        std::cout << "Image Resize: " << average << "$\\pm$" << deviation << std::endl;
+        if (Verbose::on) std::cout << "Image Resize: " << average << "$\\pm$" << deviation << std::endl;
         f << "Image Resize: " << average << "$\\pm$" << deviation << std::endl;
     }
 
     average = calcAverage(vdORBExtract_ms);
     deviation = calcDeviation(vdORBExtract_ms, average);
-    std::cout << "ORB Extraction: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "ORB Extraction: " << average << "$\\pm$" << deviation << std::endl;
     f << "ORB Extraction: " << average << "$\\pm$" << deviation << std::endl;
 
     if(!vdStereoMatch_ms.empty())
     {
         average = calcAverage(vdStereoMatch_ms);
         deviation = calcDeviation(vdStereoMatch_ms, average);
-        std::cout << "Stereo Matching: " << average << "$\\pm$" << deviation << std::endl;
+        if (Verbose::on) std::cout << "Stereo Matching: " << average << "$\\pm$" << deviation << std::endl;
         f << "Stereo Matching: " << average << "$\\pm$" << deviation << std::endl;
     }
 
@@ -362,101 +364,104 @@ void Tracking::PrintTimeStats()
     {
         average = calcAverage(vdIMUInteg_ms);
         deviation = calcDeviation(vdIMUInteg_ms, average);
-        std::cout << "IMU Preintegration: " << average << "$\\pm$" << deviation << std::endl;
+        if (Verbose::on) std::cout << "IMU Preintegration: " << average << "$\\pm$" << deviation << std::endl;
         f << "IMU Preintegration: " << average << "$\\pm$" << deviation << std::endl;
     }
 
     average = calcAverage(vdPosePred_ms);
     deviation = calcDeviation(vdPosePred_ms, average);
-    std::cout << "Pose Prediction: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "Pose Prediction: " << average << "$\\pm$" << deviation << std::endl;
     f << "Pose Prediction: " << average << "$\\pm$" << deviation << std::endl;
 
     average = calcAverage(vdLMTrack_ms);
     deviation = calcDeviation(vdLMTrack_ms, average);
-    std::cout << "LM Track: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "LM Track: " << average << "$\\pm$" << deviation << std::endl;
     f << "LM Track: " << average << "$\\pm$" << deviation << std::endl;
 
     average = calcAverage(vdNewKF_ms);
     deviation = calcDeviation(vdNewKF_ms, average);
-    std::cout << "New KF decision: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "New KF decision: " << average << "$\\pm$" << deviation << std::endl;
     f << "New KF decision: " << average << "$\\pm$" << deviation << std::endl;
 
     average = calcAverage(vdTrackTotal_ms);
     deviation = calcDeviation(vdTrackTotal_ms, average);
-    std::cout << "Total Tracking: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "Total Tracking: " << average << "$\\pm$" << deviation << std::endl;
     f << "Total Tracking: " << average << "$\\pm$" << deviation << std::endl;
 
     // Local Mapping time stats
-    std::cout << std::endl << std::endl << std::endl;
-    std::cout << "Local Mapping" << std::endl << std::endl;
+    if (Verbose::on) std::cout << std::endl << std::endl << std::endl;
+    if (Verbose::on) std::cout << "Local Mapping" << std::endl << std::endl;
     f << std::endl << "Local Mapping" << std::endl << std::endl;
 
     average = calcAverage(mpLocalMapper->vdKFInsert_ms);
     deviation = calcDeviation(mpLocalMapper->vdKFInsert_ms, average);
-    std::cout << "KF Insertion: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "KF Insertion: " << average << "$\\pm$" << deviation << std::endl;
     f << "KF Insertion: " << average << "$\\pm$" << deviation << std::endl;
 
     average = calcAverage(mpLocalMapper->vdMPCulling_ms);
     deviation = calcDeviation(mpLocalMapper->vdMPCulling_ms, average);
-    std::cout << "MP Culling: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "MP Culling: " << average << "$\\pm$" << deviation << std::endl;
     f << "MP Culling: " << average << "$\\pm$" << deviation << std::endl;
 
     average = calcAverage(mpLocalMapper->vdMPCreation_ms);
     deviation = calcDeviation(mpLocalMapper->vdMPCreation_ms, average);
-    std::cout << "MP Creation: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "MP Creation: " << average << "$\\pm$" << deviation << std::endl;
     f << "MP Creation: " << average << "$\\pm$" << deviation << std::endl;
 
     average = calcAverage(mpLocalMapper->vdLBA_ms);
     deviation = calcDeviation(mpLocalMapper->vdLBA_ms, average);
-    std::cout << "LBA: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "LBA: " << average << "$\\pm$" << deviation << std::endl;
     f << "LBA: " << average << "$\\pm$" << deviation << std::endl;
 
     average = calcAverage(mpLocalMapper->vdKFCulling_ms);
     deviation = calcDeviation(mpLocalMapper->vdKFCulling_ms, average);
-    std::cout << "KF Culling: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "KF Culling: " << average << "$\\pm$" << deviation << std::endl;
     f << "KF Culling: " << average << "$\\pm$" << deviation << std::endl;
 
     average = calcAverage(mpLocalMapper->vdLMTotal_ms);
     deviation = calcDeviation(mpLocalMapper->vdLMTotal_ms, average);
-    std::cout << "Total Local Mapping: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "Total Local Mapping: " << average << "$\\pm$" << deviation << std::endl;
     f << "Total Local Mapping: " << average << "$\\pm$" << deviation << std::endl;
 
     // Local Mapping LBA complexity
-    std::cout << "---------------------------" << std::endl;
-    std::cout << std::endl << "LBA complexity (mean$\\pm$std)" << std::endl;
+    if (Verbose::on) std::cout << "---------------------------" << std::endl;
+    if (Verbose::on) std::cout << std::endl << "LBA complexity (mean$\\pm$std)" << std::endl;
     f << "---------------------------" << std::endl;
     f << std::endl << "LBA complexity (mean$\\pm$std)" << std::endl;
 
     average = calcAverage(mpLocalMapper->vnLBA_edges);
     deviation = calcDeviation(mpLocalMapper->vnLBA_edges, average);
-    std::cout << "LBA Edges: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "LBA Edges: " << average << "$\\pm$" << deviation << std::endl;
     f << "LBA Edges: " << average << "$\\pm$" << deviation << std::endl;
 
     average = calcAverage(mpLocalMapper->vnLBA_KFopt);
     deviation = calcDeviation(mpLocalMapper->vnLBA_KFopt, average);
-    std::cout << "LBA KF optimized: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "LBA KF optimized: " << average << "$\\pm$" << deviation << std::endl;
     f << "LBA KF optimized: " << average << "$\\pm$" << deviation << std::endl;
 
     average = calcAverage(mpLocalMapper->vnLBA_KFfixed);
     deviation = calcDeviation(mpLocalMapper->vnLBA_KFfixed, average);
-    std::cout << "LBA KF fixed: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "LBA KF fixed: " << average << "$\\pm$" << deviation << std::endl;
     f << "LBA KF fixed: " << average << "$\\pm$" << deviation << std::endl;
 
     average = calcAverage(mpLocalMapper->vnLBA_MPs);
     deviation = calcDeviation(mpLocalMapper->vnLBA_MPs, average);
-    std::cout << "LBA MP: " << average << "$\\pm$" << deviation << std::endl << std::endl;
+    if (Verbose::on) std::cout << "LBA MP: " << average << "$\\pm$" << deviation << std::endl << std::endl;
     f << "LBA MP: " << average << "$\\pm$" << deviation << std::endl << std::endl;
 
-    std::cout << "LBA executions: " << mpLocalMapper->nLBA_exec << std::endl;
-    std::cout << "LBA aborts: " << mpLocalMapper->nLBA_abort << std::endl;
+    if (Verbose::on) std::cout << "LBA executions: " << mpLocalMapper->nLBA_exec << std::endl;
+    if (Verbose::on) std::cout << "LBA aborts: " << mpLocalMapper->nLBA_abort << std::endl;
     f << "LBA executions: " << mpLocalMapper->nLBA_exec << std::endl;
     f << "LBA aborts: " << mpLocalMapper->nLBA_abort << std::endl;
 
     // Map complexity
-    std::cout << "---------------------------" << std::endl;
-    std::cout << std::endl << "Map complexity" << std::endl;
-    std::cout << "KFs in map: " << mpAtlas->GetAllKeyFrames().size() << std::endl;
-    std::cout << "MPs in map: " << mpAtlas->GetAllMapPoints().size() << std::endl;
+    if (Verbose::on)
+    {
+        std::cout << "---------------------------" << std::endl;
+        std::cout << std::endl << "Map complexity" << std::endl;
+        std::cout << "KFs in map: " << mpAtlas->GetAllKeyFrames().size() << std::endl;
+        std::cout << "MPs in map: " << mpAtlas->GetAllMapPoints().size() << std::endl;
+    }
     f << "---------------------------" << std::endl;
     f << std::endl << "Map complexity" << std::endl;
     vector<Map*> vpMaps = mpAtlas->GetAllMaps();
@@ -474,100 +479,100 @@ void Tracking::PrintTimeStats()
 
     f << "---------------------------" << std::endl;
     f << std::endl << "Place Recognition (mean$\\pm$std)" << std::endl;
-    std::cout << "---------------------------" << std::endl;
-    std::cout << std::endl << "Place Recognition (mean$\\pm$std)" << std::endl;
+    if (Verbose::on) std::cout << "---------------------------" << std::endl;
+    if (Verbose::on) std::cout << std::endl << "Place Recognition (mean$\\pm$std)" << std::endl;
     average = calcAverage(mpLoopClosing->vdDataQuery_ms);
     deviation = calcDeviation(mpLoopClosing->vdDataQuery_ms, average);
     f << "Database Query: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "Database Query: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "Database Query: " << average << "$\\pm$" << deviation << std::endl;
     average = calcAverage(mpLoopClosing->vdEstSim3_ms);
     deviation = calcDeviation(mpLoopClosing->vdEstSim3_ms, average);
     f << "SE3 estimation: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "SE3 estimation: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "SE3 estimation: " << average << "$\\pm$" << deviation << std::endl;
     average = calcAverage(mpLoopClosing->vdPRTotal_ms);
     deviation = calcDeviation(mpLoopClosing->vdPRTotal_ms, average);
     f << "Total Place Recognition: " << average << "$\\pm$" << deviation << std::endl << std::endl;
-    std::cout << "Total Place Recognition: " << average << "$\\pm$" << deviation << std::endl << std::endl;
+    if (Verbose::on) std::cout << "Total Place Recognition: " << average << "$\\pm$" << deviation << std::endl << std::endl;
 
     f << std::endl << "Loop Closing (mean$\\pm$std)" << std::endl;
-    std::cout << std::endl << "Loop Closing (mean$\\pm$std)" << std::endl;
+    if (Verbose::on) std::cout << std::endl << "Loop Closing (mean$\\pm$std)" << std::endl;
     average = calcAverage(mpLoopClosing->vdLoopFusion_ms);
     deviation = calcDeviation(mpLoopClosing->vdLoopFusion_ms, average);
     f << "Loop Fusion: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "Loop Fusion: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "Loop Fusion: " << average << "$\\pm$" << deviation << std::endl;
     average = calcAverage(mpLoopClosing->vdLoopOptEss_ms);
     deviation = calcDeviation(mpLoopClosing->vdLoopOptEss_ms, average);
     f << "Essential Graph: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "Essential Graph: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "Essential Graph: " << average << "$\\pm$" << deviation << std::endl;
     average = calcAverage(mpLoopClosing->vdLoopTotal_ms);
     deviation = calcDeviation(mpLoopClosing->vdLoopTotal_ms, average);
     f << "Total Loop Closing: " << average << "$\\pm$" << deviation << std::endl << std::endl;
-    std::cout << "Total Loop Closing: " << average << "$\\pm$" << deviation << std::endl << std::endl;
+    if (Verbose::on) std::cout << "Total Loop Closing: " << average << "$\\pm$" << deviation << std::endl << std::endl;
 
     f << "Numb exec: " << mpLoopClosing->nLoop << std::endl;
-    std::cout << "Num exec: " << mpLoopClosing->nLoop << std::endl;
+    if (Verbose::on) std::cout << "Num exec: " << mpLoopClosing->nLoop << std::endl;
     average = calcAverage(mpLoopClosing->vnLoopKFs);
     deviation = calcDeviation(mpLoopClosing->vnLoopKFs, average);
     f << "Number of KFs: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "Number of KFs: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "Number of KFs: " << average << "$\\pm$" << deviation << std::endl;
 
     f << std::endl << "Map Merging (mean$\\pm$std)" << std::endl;
-    std::cout << std::endl << "Map Merging (mean$\\pm$std)" << std::endl;
+    if (Verbose::on) std::cout << std::endl << "Map Merging (mean$\\pm$std)" << std::endl;
     average = calcAverage(mpLoopClosing->vdMergeMaps_ms);
     deviation = calcDeviation(mpLoopClosing->vdMergeMaps_ms, average);
     f << "Merge Maps: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "Merge Maps: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "Merge Maps: " << average << "$\\pm$" << deviation << std::endl;
     average = calcAverage(mpLoopClosing->vdWeldingBA_ms);
     deviation = calcDeviation(mpLoopClosing->vdWeldingBA_ms, average);
     f << "Welding BA: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "Welding BA: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "Welding BA: " << average << "$\\pm$" << deviation << std::endl;
     average = calcAverage(mpLoopClosing->vdMergeOptEss_ms);
     deviation = calcDeviation(mpLoopClosing->vdMergeOptEss_ms, average);
     f << "Optimization Ess.: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "Optimization Ess.: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "Optimization Ess.: " << average << "$\\pm$" << deviation << std::endl;
     average = calcAverage(mpLoopClosing->vdMergeTotal_ms);
     deviation = calcDeviation(mpLoopClosing->vdMergeTotal_ms, average);
     f << "Total Map Merging: " << average << "$\\pm$" << deviation << std::endl << std::endl;
-    std::cout << "Total Map Merging: " << average << "$\\pm$" << deviation << std::endl << std::endl;
+    if (Verbose::on) std::cout << "Total Map Merging: " << average << "$\\pm$" << deviation << std::endl << std::endl;
 
     f << "Numb exec: " << mpLoopClosing->nMerges << std::endl;
-    std::cout << "Num exec: " << mpLoopClosing->nMerges << std::endl;
+    if (Verbose::on) std::cout << "Num exec: " << mpLoopClosing->nMerges << std::endl;
     average = calcAverage(mpLoopClosing->vnMergeKFs);
     deviation = calcDeviation(mpLoopClosing->vnMergeKFs, average);
     f << "Number of KFs: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "Number of KFs: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "Number of KFs: " << average << "$\\pm$" << deviation << std::endl;
     average = calcAverage(mpLoopClosing->vnMergeMPs);
     deviation = calcDeviation(mpLoopClosing->vnMergeMPs, average);
     f << "Number of MPs: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "Number of MPs: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "Number of MPs: " << average << "$\\pm$" << deviation << std::endl;
 
     f << std::endl << "Full GBA (mean$\\pm$std)" << std::endl;
-    std::cout << std::endl << "Full GBA (mean$\\pm$std)" << std::endl;
+    if (Verbose::on) std::cout << std::endl << "Full GBA (mean$\\pm$std)" << std::endl;
     average = calcAverage(mpLoopClosing->vdGBA_ms);
     deviation = calcDeviation(mpLoopClosing->vdGBA_ms, average);
     f << "GBA: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "GBA: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "GBA: " << average << "$\\pm$" << deviation << std::endl;
     average = calcAverage(mpLoopClosing->vdUpdateMap_ms);
     deviation = calcDeviation(mpLoopClosing->vdUpdateMap_ms, average);
     f << "Map Update: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "Map Update: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "Map Update: " << average << "$\\pm$" << deviation << std::endl;
     average = calcAverage(mpLoopClosing->vdFGBATotal_ms);
     deviation = calcDeviation(mpLoopClosing->vdFGBATotal_ms, average);
     f << "Total Full GBA: " << average << "$\\pm$" << deviation << std::endl << std::endl;
-    std::cout << "Total Full GBA: " << average << "$\\pm$" << deviation << std::endl << std::endl;
+    if (Verbose::on) std::cout << "Total Full GBA: " << average << "$\\pm$" << deviation << std::endl << std::endl;
 
     f << "Numb exec: " << mpLoopClosing->nFGBA_exec << std::endl;
-    std::cout << "Num exec: " << mpLoopClosing->nFGBA_exec << std::endl;
+    if (Verbose::on) std::cout << "Num exec: " << mpLoopClosing->nFGBA_exec << std::endl;
     f << "Numb abort: " << mpLoopClosing->nFGBA_abort << std::endl;
-    std::cout << "Num abort: " << mpLoopClosing->nFGBA_abort << std::endl;
+    if (Verbose::on) std::cout << "Num abort: " << mpLoopClosing->nFGBA_abort << std::endl;
     average = calcAverage(mpLoopClosing->vnGBAKFs);
     deviation = calcDeviation(mpLoopClosing->vnGBAKFs, average);
     f << "Number of KFs: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "Number of KFs: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "Number of KFs: " << average << "$\\pm$" << deviation << std::endl;
     average = calcAverage(mpLoopClosing->vnGBAMPs);
     deviation = calcDeviation(mpLoopClosing->vnGBAMPs, average);
     f << "Number of MPs: " << average << "$\\pm$" << deviation << std::endl;
-    std::cout << "Number of MPs: " << average << "$\\pm$" << deviation << std::endl;
+    if (Verbose::on) std::cout << "Number of MPs: " << average << "$\\pm$" << deviation << std::endl;
 
     f.close();
 
@@ -651,7 +656,7 @@ void Tracking::newParameterLoader(Settings *settings) {
     if(mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR)
         mpIniORBextractor = new ORBextractor(5*nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST,bUseShiTomasi);
 
-    std::cout << "- Detector: " << (bUseShiTomasi ? "Shi-Tomasi (hybrid frontend)" : "FAST (stock)") << std::endl;
+    if (Verbose::on) std::cout << "- Detector: " << (bUseShiTomasi ? "Shi-Tomasi (hybrid frontend)" : "FAST (stock)") << std::endl;
 
     //IMU parameters
     Sophus::SE3f Tbc = settings->Tbc();
@@ -672,7 +677,7 @@ void Tracking::newParameterLoader(Settings *settings) {
 bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
 {
     mDistCoef = cv::Mat::zeros(4,1,CV_32F);
-    cout << endl << "Camera Parameters: " << endl;
+    if (Verbose::on) cout << endl << "Camera Parameters: " << endl;
     bool b_miss_params = false;
 
     string sCameraName = fSettings["Camera.type"];
@@ -804,20 +809,23 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
 
         mpCamera = mpAtlas->AddCamera(mpCamera);
 
-        std::cout << "- Camera: Pinhole" << std::endl;
-        std::cout << "- Image scale: " << mImageScale << std::endl;
-        std::cout << "- fx: " << fx << std::endl;
-        std::cout << "- fy: " << fy << std::endl;
-        std::cout << "- cx: " << cx << std::endl;
-        std::cout << "- cy: " << cy << std::endl;
-        std::cout << "- k1: " << mDistCoef.at<float>(0) << std::endl;
-        std::cout << "- k2: " << mDistCoef.at<float>(1) << std::endl;
+        if (Verbose::on)
+        {
+            std::cout << "- Camera: Pinhole" << std::endl;
+            std::cout << "- Image scale: " << mImageScale << std::endl;
+            std::cout << "- fx: " << fx << std::endl;
+            std::cout << "- fy: " << fy << std::endl;
+            std::cout << "- cx: " << cx << std::endl;
+            std::cout << "- cy: " << cy << std::endl;
+            std::cout << "- k1: " << mDistCoef.at<float>(0) << std::endl;
+            std::cout << "- k2: " << mDistCoef.at<float>(1) << std::endl;
+        }
 
 
-        std::cout << "- p1: " << mDistCoef.at<float>(2) << std::endl;
-        std::cout << "- p2: " << mDistCoef.at<float>(3) << std::endl;
+        if (Verbose::on) std::cout << "- p1: " << mDistCoef.at<float>(2) << std::endl;
+        if (Verbose::on) std::cout << "- p2: " << mDistCoef.at<float>(3) << std::endl;
 
-        if(mDistCoef.rows==5)
+        if(Verbose::on && mDistCoef.rows==5)
             std::cout << "- k3: " << mDistCoef.at<float>(4) << std::endl;
 
         mK = cv::Mat::eye(3,3,CV_32F);
@@ -946,16 +954,19 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
             vector<float> vCamCalib{fx,fy,cx,cy,k1,k2,k3,k4};
             mpCamera = new KannalaBrandt8(vCamCalib);
             mpCamera = mpAtlas->AddCamera(mpCamera);
-            std::cout << "- Camera: Fisheye" << std::endl;
-            std::cout << "- Image scale: " << mImageScale << std::endl;
-            std::cout << "- fx: " << fx << std::endl;
-            std::cout << "- fy: " << fy << std::endl;
-            std::cout << "- cx: " << cx << std::endl;
-            std::cout << "- cy: " << cy << std::endl;
-            std::cout << "- k1: " << k1 << std::endl;
-            std::cout << "- k2: " << k2 << std::endl;
-            std::cout << "- k3: " << k3 << std::endl;
-            std::cout << "- k4: " << k4 << std::endl;
+            if (Verbose::on)
+            {
+                std::cout << "- Camera: Fisheye" << std::endl;
+                std::cout << "- Image scale: " << mImageScale << std::endl;
+                std::cout << "- fx: " << fx << std::endl;
+                std::cout << "- fy: " << fy << std::endl;
+                std::cout << "- cx: " << cx << std::endl;
+                std::cout << "- cy: " << cy << std::endl;
+                std::cout << "- k1: " << k1 << std::endl;
+                std::cout << "- k2: " << k2 << std::endl;
+                std::cout << "- k3: " << k3 << std::endl;
+                std::cout << "- k4: " << k4 << std::endl;
+            }
 
             mK = cv::Mat::eye(3,3,CV_32F);
             mK.at<float>(0,0) = fx;
@@ -1151,23 +1162,26 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
                 static_cast<KannalaBrandt8*>(mpCamera2)->mvLappingArea[0] = rightLappingBegin;
                 static_cast<KannalaBrandt8*>(mpCamera2)->mvLappingArea[1] = rightLappingEnd;
 
-                std::cout << "- Camera1 Lapping: " << leftLappingBegin << ", " << leftLappingEnd << std::endl;
+                if (Verbose::on) std::cout << "- Camera1 Lapping: " << leftLappingBegin << ", " << leftLappingEnd << std::endl;
 
-                std::cout << std::endl << "Camera2 Parameters:" << std::endl;
-                std::cout << "- Camera: Fisheye" << std::endl;
-                std::cout << "- Image scale: " << mImageScale << std::endl;
-                std::cout << "- fx: " << fx << std::endl;
-                std::cout << "- fy: " << fy << std::endl;
-                std::cout << "- cx: " << cx << std::endl;
-                std::cout << "- cy: " << cy << std::endl;
-                std::cout << "- k1: " << k1 << std::endl;
-                std::cout << "- k2: " << k2 << std::endl;
-                std::cout << "- k3: " << k3 << std::endl;
-                std::cout << "- k4: " << k4 << std::endl;
+                if (Verbose::on)
+                {
+                    std::cout << std::endl << "Camera2 Parameters:" << std::endl;
+                    std::cout << "- Camera: Fisheye" << std::endl;
+                    std::cout << "- Image scale: " << mImageScale << std::endl;
+                    std::cout << "- fx: " << fx << std::endl;
+                    std::cout << "- fy: " << fy << std::endl;
+                    std::cout << "- cx: " << cx << std::endl;
+                    std::cout << "- cy: " << cy << std::endl;
+                    std::cout << "- k1: " << k1 << std::endl;
+                    std::cout << "- k2: " << k2 << std::endl;
+                    std::cout << "- k3: " << k3 << std::endl;
+                    std::cout << "- k4: " << k4 << std::endl;
+                }
 
-                std::cout << "- mTlr: \n" << cvTlr << std::endl;
+                if (Verbose::on) std::cout << "- mTlr: \n" << cvTlr << std::endl;
 
-                std::cout << "- Camera2 Lapping: " << rightLappingBegin << ", " << rightLappingEnd << std::endl;
+                if (Verbose::on) std::cout << "- Camera2 Lapping: " << rightLappingBegin << ", " << rightLappingEnd << std::endl;
             }
         }
 
@@ -1210,16 +1224,19 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
     mMinFrames = 0;
     mMaxFrames = fps;
 
-    cout << "- fps: " << fps << endl;
+    if (Verbose::on) cout << "- fps: " << fps << endl;
 
 
     int nRGB = fSettings["Camera.RGB"];
     mbRGB = nRGB;
 
-    if(mbRGB)
-        cout << "- color order: RGB (ignored if grayscale)" << endl;
-    else
-        cout << "- color order: BGR (ignored if grayscale)" << endl;
+    if (Verbose::on)
+    {
+        if(mbRGB)
+            cout << "- color order: RGB (ignored if grayscale)" << endl;
+        else
+            cout << "- color order: BGR (ignored if grayscale)" << endl;
+    }
 
     if(mSensor==System::STEREO || mSensor==System::RGBD || mSensor==System::IMU_STEREO || mSensor==System::IMU_RGBD)
     {
@@ -1229,7 +1246,7 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
         {
             mThDepth = node.real();
             mThDepth = mbf*mThDepth/fx;
-            cout << endl << "Depth Threshold (Close/Far Points): " << mThDepth << endl;
+            if (Verbose::on) cout << endl << "Depth Threshold (Close/Far Points): " << mThDepth << endl;
         }
         else
         {
@@ -1347,15 +1364,18 @@ bool Tracking::ParseORBParamFile(cv::FileStorage &fSettings)
     if(mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR)
         mpIniORBextractor = new ORBextractor(5*nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST,bUseShiTomasi);
 
-    cout << endl << "ORB Extractor Parameters: " << endl;
-    cout << "- Detector: " << (bUseShiTomasi ? "Shi-Tomasi (hybrid frontend)" : "FAST (stock)") << endl;
+    if (Verbose::on) cout << endl << "ORB Extractor Parameters: " << endl;
+    if (Verbose::on) cout << "- Detector: " << (bUseShiTomasi ? "Shi-Tomasi (hybrid frontend)" : "FAST (stock)") << endl;
 
-    cout << endl << "ORB Extractor Parameters: " << endl;
-    cout << "- Number of Features: " << nFeatures << endl;
-    cout << "- Scale Levels: " << nLevels << endl;
-    cout << "- Scale Factor: " << fScaleFactor << endl;
-    cout << "- Initial Fast Threshold: " << fIniThFAST << endl;
-    cout << "- Minimum Fast Threshold: " << fMinThFAST << endl;
+    if (Verbose::on)
+    {
+        cout << endl << "ORB Extractor Parameters: " << endl;
+        cout << "- Number of Features: " << nFeatures << endl;
+        cout << "- Scale Levels: " << nLevels << endl;
+        cout << "- Scale Factor: " << fScaleFactor << endl;
+        cout << "- Initial Fast Threshold: " << fIniThFAST << endl;
+        cout << "- Minimum Fast Threshold: " << fMinThFAST << endl;
+    }
 
     return true;
 }
@@ -1380,8 +1400,8 @@ bool Tracking::ParseIMUParamFile(cv::FileStorage &fSettings)
         std::cerr << "*Tbc matrix doesn't exist*" << std::endl;
         b_miss_params = true;
     }
-    cout << endl;
-    cout << "Left camera to Imu Transform (Tbc): " << endl << cvTbc << endl;
+    if (Verbose::on) cout << endl;
+    if (Verbose::on) cout << "Left camera to Imu Transform (Tbc): " << endl << cvTbc << endl;
     Eigen::Matrix<float,4,4,Eigen::RowMajor> eigTbc(cvTbc.ptr<float>(0));
     Sophus::SE3f Tbc(eigTbc);
 
@@ -1392,7 +1412,7 @@ bool Tracking::ParseIMUParamFile(cv::FileStorage &fSettings)
         mInsertKFsLost = (bool) node.operator int();
     }
 
-    if(!mInsertKFsLost)
+    if(Verbose::on && !mInsertKFsLost)
         cout << "Do not insert keyframes when lost visual tracking " << endl;
 
 
@@ -1462,7 +1482,7 @@ bool Tracking::ParseIMUParamFile(cv::FileStorage &fSettings)
         mFastInit = static_cast<int>(fSettings["IMU.fastInit"]) != 0;
     }
 
-    if(mFastInit)
+    if(Verbose::on && mFastInit)
         cout << "Fast IMU initialization. Acceleration is not checked \n";
 
     if(b_miss_params)
@@ -1471,12 +1491,15 @@ bool Tracking::ParseIMUParamFile(cv::FileStorage &fSettings)
     }
 
     const float sf = sqrt(mImuFreq);
-    cout << endl;
-    cout << "IMU frequency: " << mImuFreq << " Hz" << endl;
-    cout << "IMU gyro noise: " << Ng << " rad/s/sqrt(Hz)" << endl;
-    cout << "IMU gyro walk: " << Ngw << " rad/s^2/sqrt(Hz)" << endl;
-    cout << "IMU accelerometer noise: " << Na << " m/s^2/sqrt(Hz)" << endl;
-    cout << "IMU accelerometer walk: " << Naw << " m/s^3/sqrt(Hz)" << endl;
+    if (Verbose::on)
+    {
+        cout << endl;
+        cout << "IMU frequency: " << mImuFreq << " Hz" << endl;
+        cout << "IMU gyro noise: " << Ng << " rad/s/sqrt(Hz)" << endl;
+        cout << "IMU gyro walk: " << Ngw << " rad/s^2/sqrt(Hz)" << endl;
+        cout << "IMU accelerometer noise: " << Na << " m/s^2/sqrt(Hz)" << endl;
+        cout << "IMU accelerometer walk: " << Naw << " m/s^3/sqrt(Hz)" << endl;
+    }
 
     mpImuCalib = new IMU::Calib(Tbc,Ng*sf,Na*sf,Ngw/sf,Naw/sf);
 
@@ -1557,26 +1580,29 @@ Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat 
         } else {
             const hybrid_frontend::FrameResult hr =
                 mpHybridFrontend->process_frame(mImGray);
-            std::cout << "[Hybrid] f=" << hr.frame_index
-                      << " in=" << hr.tracks_in
-                      << " klt=" << hr.tracks_after_klt
-                      << " fb=" << hr.tracks_after_fb
-                      << " ransac=" << hr.tracks_after_ransac
-                      << " new=" << hr.new_corners_detected
-                      << " reid=" << hr.reids_succeeded << "/"
-                      << hr.reids_attempted
-                      << " out=" << hr.tracks_out
-                      << " dorm=" << hr.dormant_buffer_size
-                      << " adults=" << hr.adults_discarded
-                      << " flow=(" << hr.median_flow_dx << ","
-                      << hr.median_flow_dy << ")"
-                      << " ms=" << hr.ms_total
-                      << "(t" << hr.ms_track << "/d" << hr.ms_detect
-                      << "/r" << hr.ms_reid << ")"
-                      << " oct=";
-            for (std::size_t o = 0; o < hr.octave_histogram.size(); ++o)
-                std::cout << (o ? "," : "") << hr.octave_histogram[o];
-            std::cout << std::endl;
+            if (Verbose::on)
+            {
+                std::cout << "[Hybrid] f=" << hr.frame_index
+                          << " in=" << hr.tracks_in
+                          << " klt=" << hr.tracks_after_klt
+                          << " fb=" << hr.tracks_after_fb
+                          << " ransac=" << hr.tracks_after_ransac
+                          << " new=" << hr.new_corners_detected
+                          << " reid=" << hr.reids_succeeded << "/"
+                          << hr.reids_attempted
+                          << " out=" << hr.tracks_out
+                          << " dorm=" << hr.dormant_buffer_size
+                          << " adults=" << hr.adults_discarded
+                          << " flow=(" << hr.median_flow_dx << ","
+                          << hr.median_flow_dy << ")"
+                          << " ms=" << hr.ms_total
+                          << "(t" << hr.ms_track << "/d" << hr.ms_detect
+                          << "/r" << hr.ms_reid << ")"
+                          << " oct=";
+                for (std::size_t o = 0; o < hr.octave_histogram.size(); ++o)
+                    std::cout << (o ? "," : "") << hr.octave_histogram[o];
+                std::cout << std::endl;
+            }
         }
     }
 
@@ -1616,13 +1642,13 @@ Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat 
 
     //cout << "Tracking start" << endl;
     Track();
-    if (mbHybridTakeover)
-    std::cout << "[HybridTrack] f=" << mpHybridFrontend->frame_index()
-              << " idmatch=" << mnHybridIdMatches
-              << " tlmH=" << mnHybridTlmMatches
-              << " tlm=" << mnMatchesInliers
-              << " N=" << mCurrentFrame.N
-              << " state=" << mState << std::endl;
+    if (Verbose::on && mbHybridTakeover)
+        std::cout << "[HybridTrack] f=" << mpHybridFrontend->frame_index()
+                  << " idmatch=" << mnHybridIdMatches
+                  << " tlmH=" << mnHybridTlmMatches
+                  << " tlm=" << mnMatchesInliers
+                  << " N=" << mCurrentFrame.N
+                  << " state=" << mState << std::endl;
     //cout << "Tracking end" << endl;
 
     return mCurrentFrame.GetPose();
@@ -1788,7 +1814,7 @@ void Tracking::PreintegrateIMU()
 
     const int n = mvImuFromLastFrame.size()-1;
     if(n==0){
-        cout << "Empty IMU measurements vector!!!\n";
+        if (Verbose::on) cout << "Empty IMU measurements vector!!!\n";
         return;
     }
 
@@ -1891,7 +1917,7 @@ bool Tracking::PredictStateIMU()
         mCurrentFrame.mPredBias = mCurrentFrame.mImuBias;
         return true;
     }
-    else
+    else if (Verbose::on)
         cout << "not IMU prediction!!" << endl;
 
     return false;
@@ -1908,7 +1934,7 @@ void Tracking::Track()
 
     if (bStepByStep)
     {
-        std::cout << "Tracking: Waiting to the next step" << std::endl;
+        if (Verbose::on) std::cout << "Tracking: Waiting to the next step" << std::endl;
         while(!mbStep && bStepByStep)
             usleep(500);
         mbStep = false;
@@ -1916,7 +1942,7 @@ void Tracking::Track()
 
     if(mpLocalMapper->mbBadImu)
     {
-        cout << "TRACK: Reset map because local mapper set the bad imu flag " << endl;
+        if (Verbose::on) cout << "TRACK: Reset map because local mapper set the bad imu flag " << endl;
         mpSystem->ResetActiveMap();
         return;
     }
@@ -1946,7 +1972,7 @@ void Tracking::Track()
 
                 if(mpAtlas->isImuInitialized())
                 {
-                    cout << "Timestamp jump detected. State set to LOST. Reseting IMU integration..." << endl;
+                    if (Verbose::on) cout << "Timestamp jump detected. State set to LOST. Reseting IMU integration..." << endl;
                     if(!pCurrentMap->GetIniertialBA2())
                     {
                         mpSystem->ResetActiveMap();
@@ -1958,7 +1984,7 @@ void Tracking::Track()
                 }
                 else
                 {
-                    cout << "Timestamp jump detected, before IMU initialization. Reseting..." << endl;
+                    if (Verbose::on) cout << "Timestamp jump detected, before IMU initialization. Reseting..." << endl;
                     mpSystem->ResetActiveMap();
                 }
                 return;
@@ -2239,7 +2265,7 @@ void Tracking::Track()
                 bOK = TrackLocalMap();
 
             }
-            if(!bOK)
+            if(Verbose::on && !bOK)
                 cout << "Fail to track local map!" << endl;
         }
         else
@@ -2260,7 +2286,7 @@ void Tracking::Track()
                 Verbose::PrintMess("Track lost for less than one second...", Verbose::VERBOSITY_NORMAL);
                 if(!pCurrentMap->isImuInitialized() || !pCurrentMap->GetIniertialBA2())
                 {
-                    cout << "IMU is not or recently initialized. Reseting active map..." << endl;
+                    if (Verbose::on) cout << "IMU is not or recently initialized. Reseting active map..." << endl;
                     mpSystem->ResetActiveMap();
                 }
 
@@ -2294,7 +2320,7 @@ void Tracking::Track()
             {
                 if(mCurrentFrame.mnId==(mnLastRelocFrameId+mnFramesToResetIMU))
                 {
-                    cout << "RESETING FRAME!!!" << endl;
+                    if (Verbose::on) cout << "RESETING FRAME!!!" << endl;
                     ResetFrameIMU();
                 }
                 else if(mCurrentFrame.mnId>(mnLastRelocFrameId+30))
@@ -2455,13 +2481,13 @@ void Tracking::StereoInitialization()
         {
             if (!mCurrentFrame.mpImuPreintegrated || !mLastFrame.mpImuPreintegrated)
             {
-                cout << "not IMU meas" << endl;
+                if (Verbose::on) cout << "not IMU meas" << endl;
                 return;
             }
 
             if (!mFastInit && (mCurrentFrame.mpImuPreintegratedFrame->avgA-mLastFrame.mpImuPreintegratedFrame->avgA).norm()<0.5)
             {
-                cout << "not enough acceleration" << endl;
+                if (Verbose::on) cout << "not enough acceleration" << endl;
                 return;
             }
 
@@ -2851,7 +2877,7 @@ bool Tracking::TrackReferenceKeyFrame()
 
     if(nmatches<15)
     {
-        cout << "TRACK_REF_KF: Less than 15 matches!!\n";
+        if (Verbose::on) cout << "TRACK_REF_KF: Less than 15 matches!!\n";
         return false;
     }
 
@@ -3894,7 +3920,7 @@ bool Tracking::Relocalization()
     else
     {
         mnLastRelocFrameId = mCurrentFrame.mnId;
-        cout << "Relocalized!!" << endl;
+        if (Verbose::on) cout << "Relocalized!!" << endl;
         return true;
     }
 
@@ -4009,7 +4035,7 @@ void Tracking::ResetActiveMap(bool bLocMap)
     list<bool> lbLost;
     // lbLost.reserve(mlbLost.size());
     unsigned int index = mnFirstFrameId;
-    cout << "mnFirstFrameId = " << mnFirstFrameId << endl;
+    if (Verbose::on) cout << "mnFirstFrameId = " << mnFirstFrameId << endl;
     for(Map* pMap : mpAtlas->GetAllMaps())
     {
         if(pMap->GetAllKeyFrames().size() > 0)
@@ -4021,7 +4047,7 @@ void Tracking::ResetActiveMap(bool bLocMap)
 
     //cout << "First Frame id: " << index << endl;
     int num_lost = 0;
-    cout << "mnInitialFrameId = " << mnInitialFrameId << endl;
+    if (Verbose::on) cout << "mnInitialFrameId = " << mnInitialFrameId << endl;
 
     for(list<bool>::iterator ilbL = mlbLost.begin(); ilbL != mlbLost.end(); ilbL++)
     {
@@ -4035,7 +4061,7 @@ void Tracking::ResetActiveMap(bool bLocMap)
 
         index++;
     }
-    cout << num_lost << " Frames set to lost" << endl;
+    if (Verbose::on) cout << num_lost << " Frames set to lost" << endl;
 
     mlbLost = lbLost;
 
@@ -4224,7 +4250,7 @@ bool Tracking::Stop()
     if(mbStopRequested && !mbNotStop)
     {
         mbStopped = true;
-        cout << "Tracking STOP" << endl;
+        if (Verbose::on) cout << "Tracking STOP" << endl;
         return true;
     }
 
@@ -4252,3 +4278,4 @@ void Tracking::Release()
 #endif
 
 } //namespace ORB_SLAM
+

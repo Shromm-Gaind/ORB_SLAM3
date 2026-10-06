@@ -17,6 +17,7 @@
 */
 
 #include "MapPoint.h"
+#include "Verbose.h"
 #include "ORBmatcher.h"
 
 #include<mutex>
@@ -547,13 +548,13 @@ int MapPoint::PredictScale(const float &currentDist, Frame* pF)
 
 void MapPoint::PrintObservations()
 {
-    cout << "MP_OBS: MP " << mnId << endl;
+    if (Verbose::on) cout << "MP_OBS: MP " << mnId << endl;
     for(map<KeyFrame*,tuple<int,int>>::iterator mit=mObservations.begin(), mend=mObservations.end(); mit!=mend; mit++)
     {
         KeyFrame* pKFi = mit->first;
         tuple<int,int> indexes = mit->second;
         int leftIndex = get<0>(indexes), rightIndex = get<1>(indexes);
-        cout << "--OBS in KF " << pKFi->mnId << " in map " << pKFi->GetMap()->GetId() << endl;
+        if (Verbose::on) cout << "--OBS in KF " << pKFi->mnId << " in map " << pKFi->GetMap()->GetId() << endl;
     }
 }
 

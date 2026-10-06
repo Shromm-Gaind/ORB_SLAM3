@@ -18,6 +18,7 @@
 
 
 #include "Viewer.h"
+#include "Verbose.h"
 #include <pangolin/pangolin.h>
 
 #include <mutex>
@@ -218,7 +219,7 @@ void Viewer::Run()
 
     float trackedImageScale = mpTracker->GetImageScale();
 
-    cout << "Starting the Viewer" << endl;
+    if (Verbose::on) cout << "Starting the Viewer" << endl;
     while(1)
     {
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -365,6 +366,9 @@ void Viewer::Run()
             // Save camera trajectory
             mpSystem->SaveTrajectoryEuRoC("CameraTrajectory.txt");
             mpSystem->SaveKeyFrameTrajectoryEuRoC("KeyFrameTrajectory.txt");
+
+            // Save the run log again so it includes the messages printed above
+            Verbose::SaveLog("run.log");
             menuStop = false;
         }
 

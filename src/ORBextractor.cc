@@ -61,6 +61,7 @@
 #include <algorithm>   // HYBRID FRONTEND: std::nth_element / std::max
 
 #include "ORBextractor.h"
+#include "Verbose.h"
 
 
 using namespace cv;
@@ -493,30 +494,34 @@ namespace ORB_SLAM3
             ++v0;
         }
 
-        // HYBRID FRONTEND: announce the active detector unconditionally.
+        // HYBRID FRONTEND: announce the active detector whenever verbose
+        // output is on, regardless of how the detector was configured.
         // This is the authoritative statement of what is running — it is
         // printed by the extractor itself, so it cannot disagree with
         // actual behaviour no matter how the config was plumbed.
-        std::cout << "[ORBextractor] detector = "
-                  << (bUseShiTomasi ? "SHI-TOMASI (hybrid frontend)"
-                                    : "FAST (stock ORB-SLAM3)")
-                  << "  |  nFeatures=" << nfeatures
-                  << " scaleFactor=" << scaleFactor
-                  << " nLevels=" << nlevels << std::endl;
-        if(bUseShiTomasi)
+        if (Verbose::on)
         {
-            std::cout << "               lambda2 blockSize=" << ST_BLOCK_SIZE
-                      << " sobel=" << ST_SOBEL_KSIZE
-                      << " nmsRadius=" << ST_NMS_RADIUS
-                      << " selection=rank(quadtree on lambda2)" << std::endl;
-            std::cout << "               NOTE: ORBextractor.iniThFAST ("
-                      << iniThFAST << ") and minThFAST (" << minThFAST
-                      << ") are IGNORED by this detector." << std::endl;
-        }
-        else
-        {
-            std::cout << "               iniThFAST=" << iniThFAST
-                      << " minThFAST=" << minThFAST << std::endl;
+            std::cout << "[ORBextractor] detector = "
+                      << (bUseShiTomasi ? "SHI-TOMASI (hybrid frontend)"
+                                        : "FAST (stock ORB-SLAM3)")
+                      << "  |  nFeatures=" << nfeatures
+                      << " scaleFactor=" << scaleFactor
+                      << " nLevels=" << nlevels << std::endl;
+            if(bUseShiTomasi)
+            {
+                std::cout << "               lambda2 blockSize=" << ST_BLOCK_SIZE
+                          << " sobel=" << ST_SOBEL_KSIZE
+                          << " nmsRadius=" << ST_NMS_RADIUS
+                          << " selection=rank(quadtree on lambda2)" << std::endl;
+                std::cout << "               NOTE: ORBextractor.iniThFAST ("
+                          << iniThFAST << ") and minThFAST (" << minThFAST
+                          << ") are IGNORED by this detector." << std::endl;
+            }
+            else
+            {
+                std::cout << "               iniThFAST=" << iniThFAST
+                          << " minThFAST=" << minThFAST << std::endl;
+            }
         }
     }
 

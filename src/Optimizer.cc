@@ -18,6 +18,7 @@
 
 
 #include "Optimizer.h"
+#include "Verbose.h"
 
 
 #include <complex>
@@ -562,7 +563,7 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
                     optimizer.addEdge(ear);
                 }
             }
-            else
+            else if (Verbose::on)
                 cout << pKFi->mnId << " or " << pKFi->mPrevKF->mnId << " no imu" << endl;
         }
     }
@@ -2599,7 +2600,7 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
 
         if(!pKFi->mPrevKF)
         {
-            cout << "NOT INERTIAL LINK TO PREVIOUS FRAME!!!!" << endl;
+            if (Verbose::on) cout << "NOT INERTIAL LINK TO PREVIOUS FRAME!!!!" << endl;
             continue;
         }
         if(pKFi->bImu && pKFi->mPrevKF->bImu && pKFi->mpImuPreintegrated)
@@ -2890,7 +2891,7 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
     // TODO: Some convergence problems have been detected here
     if((2*err < err_end || isnan(err) || isnan(err_end)) && !bLarge) //bGN)
     {
-        cout << "FAIL LOCAL-INERTIAL BA!!!!" << endl;
+        if (Verbose::on) cout << "FAIL LOCAL-INERTIAL BA!!!!" << endl;
         return;
     }
 

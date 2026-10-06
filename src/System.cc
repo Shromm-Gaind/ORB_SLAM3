@@ -21,6 +21,10 @@
 #include "System.h"
 #include "Converter.h"
 #include <thread>
+#include <mutex>
+#include <cstdlib>
+#include <fstream>
+#include <streambuf>
 #include <pangolin/pangolin.h>
 #include <iomanip>
 #include <openssl/md5.h>
@@ -37,34 +41,129 @@ namespace ORB_SLAM3
 {
 
 Verbose::eLevel Verbose::th = Verbose::VERBOSITY_NORMAL;
+std::atomic<bool> Verbose::on(false);
+
+namespace
+{
+
+// In-memory copy of everything written to cout / cerr since Verbose::StartLog().
+// Allocated once and never freed: cout is still flushed during static destruction,
+// so this has to outlive every other object in the program.
+struct RunLog
+{
+    std::mutex mMutex;
+    std::string mText;
+    std::string mFile;      // file of the last SaveLog(), rewritten at exit
+    bool mbStarted = false;
+};
+
+RunLog& GetRunLog()
+{
+    static RunLog* pLog = new RunLog;
+    return *pLog;
+}
+
+// Stream buffer that forwards to the original buffer (the terminal) and appends
+// the same characters to the run log. One mutex covers both, so the log has the
+// lines in the order they reached the terminal, whichever thread wrote them.
+class TeeBuf : public std::streambuf
+{
+public:
+    explicit TeeBuf(std::streambuf* pDest) : mpDest(pDest) {}
+
+protected:
+    int_type overflow(int_type c) override
+    {
+        if(traits_type::eq_int_type(c, traits_type::eof()))
+            return traits_type::not_eof(c);
+        RunLog& log = GetRunLog();
+        std::lock_guard<std::mutex> lock(log.mMutex);
+        log.mText.push_back(traits_type::to_char_type(c));
+        return mpDest->sputc(traits_type::to_char_type(c));
+    }
+
+    std::streamsize xsputn(const char* s, std::streamsize n) override
+    {
+        RunLog& log = GetRunLog();
+        std::lock_guard<std::mutex> lock(log.mMutex);
+        log.mText.append(s, static_cast<size_t>(n));
+        return mpDest->sputn(s, n);
+    }
+
+    int sync() override
+    {
+        std::lock_guard<std::mutex> lock(GetRunLog().mMutex);
+        return mpDest->pubsync();
+    }
+
+private:
+    std::streambuf* mpDest;
+};
+
+bool WriteRunLog(const std::string& filename)
+{
+    RunLog& log = GetRunLog();
+    std::string text;
+    {
+        std::lock_guard<std::mutex> lock(log.mMutex);
+        if(!log.mbStarted)
+            return true;
+        text = log.mText;
+        log.mFile = filename;
+    }
+
+    std::ofstream f(filename.c_str(), std::ios::out | std::ios::trunc);
+    if(!f.is_open())
+        return false;
+    f << text;
+    return f.good();
+}
+
+// Output printed after the last SaveLog() (e.g. the trajectory-saving messages,
+// or whatever main() prints before returning) is added when the program exits.
+void RewriteRunLogAtExit()
+{
+    std::string filename;
+    {
+        std::lock_guard<std::mutex> lock(GetRunLog().mMutex);
+        filename = GetRunLog().mFile;
+    }
+    if(!filename.empty())
+        WriteRunLog(filename);
+}
+
+} // anonymous namespace
+
+void Verbose::StartLog()
+{
+    RunLog& log = GetRunLog();
+    std::lock_guard<std::mutex> lock(log.mMutex);
+    if(log.mbStarted)
+        return;
+    log.mbStarted = true;
+
+    // The TeeBufs are never deleted, for the same reason RunLog is not.
+    std::cout.rdbuf(new TeeBuf(std::cout.rdbuf()));
+    std::cerr.rdbuf(new TeeBuf(std::cerr.rdbuf()));
+    std::atexit(RewriteRunLogAtExit);
+}
+
+void Verbose::SaveLog(const std::string& filename)
+{
+    if (Verbose::on) std::cout << std::endl << "Saving run log to " << filename << " ..." << std::endl;
+    std::cout.flush();
+
+    if(!WriteRunLog(filename))
+        std::cerr << "ERROR: could not write run log to " << filename << std::endl;
+}
 
 System::System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor,
                const bool bUseViewer, const int initFr, const string &strSequence):
     mSensor(sensor), mpViewer(static_cast<Viewer*>(NULL)), mbReset(false), mbResetActiveMap(false),
     mbActivateLocalizationMode(false), mbDeactivateLocalizationMode(false), mbShutDown(false)
 {
-    // Output welcome message
-    cout << endl <<
-    "ORB-SLAM3 Copyright (C) 2017-2020 Carlos Campos, Richard Elvira, Juan J. Gómez, José M.M. Montiel and Juan D. Tardós, University of Zaragoza." << endl <<
-    "ORB-SLAM2 Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of Zaragoza." << endl <<
-    "This program comes with ABSOLUTELY NO WARRANTY;" << endl  <<
-    "This is free software, and you are welcome to redistribute it" << endl <<
-    "under certain conditions. See LICENSE.txt." << endl << endl;
-
-    cout << "Input sensor was set to: ";
-
-    if(mSensor==MONOCULAR)
-        cout << "Monocular" << endl;
-    else if(mSensor==STEREO)
-        cout << "Stereo" << endl;
-    else if(mSensor==RGBD)
-        cout << "RGB-D" << endl;
-    else if(mSensor==IMU_MONOCULAR)
-        cout << "Monocular-Inertial" << endl;
-    else if(mSensor==IMU_STEREO)
-        cout << "Stereo-Inertial" << endl;
-    else if(mSensor==IMU_RGBD)
-        cout << "RGB-D-Inertial" << endl;
+    // From here on, everything printed is also kept for run.log (written in Shutdown)
+    Verbose::StartLog();
 
     //Check settings file
     cv::FileStorage fsSettings(strSettingsFile.c_str(), cv::FileStorage::READ);
@@ -74,6 +173,42 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
        exit(-1);
     }
 
+    // Verbose flag. Read before anything is printed so it also covers the start-up output.
+    //   System.Verbose: 1   print everything
+    //   System.Verbose: 0   print only errors and warnings
+    // If the key is missing the flag keeps its current value (off, unless
+    // Verbose::SetVerbose(true) was called before constructing System).
+    cv::FileNode nodeVerbose = fsSettings["System.Verbose"];
+    if(!nodeVerbose.empty() && nodeVerbose.isInt())
+        Verbose::SetVerbose(nodeVerbose.operator int() != 0);
+
+    // Output welcome message
+    if (Verbose::on)
+        cout << endl <<
+        "ORB-SLAM3 Copyright (C) 2017-2020 Carlos Campos, Richard Elvira, Juan J. Gómez, José M.M. Montiel and Juan D. Tardós, University of Zaragoza." << endl <<
+        "ORB-SLAM2 Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of Zaragoza." << endl <<
+        "This program comes with ABSOLUTELY NO WARRANTY;" << endl  <<
+        "This is free software, and you are welcome to redistribute it" << endl <<
+        "under certain conditions. See LICENSE.txt." << endl << endl;
+
+    if (Verbose::on)
+    {
+        cout << "Input sensor was set to: ";
+
+        if(mSensor==MONOCULAR)
+            cout << "Monocular" << endl;
+        else if(mSensor==STEREO)
+            cout << "Stereo" << endl;
+        else if(mSensor==RGBD)
+            cout << "RGB-D" << endl;
+        else if(mSensor==IMU_MONOCULAR)
+            cout << "Monocular-Inertial" << endl;
+        else if(mSensor==IMU_STEREO)
+            cout << "Stereo-Inertial" << endl;
+        else if(mSensor==IMU_RGBD)
+            cout << "RGB-D-Inertial" << endl;
+    }
+
     cv::FileNode node = fsSettings["File.version"];
     if(!node.empty() && node.isString() && node.string() == "1.0"){
         settings_ = new Settings(strSettingsFile,mSensor);
@@ -81,7 +216,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
         mStrLoadAtlasFromFile = settings_->atlasLoadFile();
         mStrSaveAtlasToFile = settings_->atlasSaveFile();
 
-        cout << (*settings_) << endl;
+        if (Verbose::on) cout << (*settings_) << endl;
     }
     else{
         settings_ = nullptr;
@@ -110,9 +245,10 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     if(!node.empty() && node.isInt())
         bruteForceLC = node.operator int() != 0;
 
-    std::cout << "Loop closing: active = " << (activeLC ? "yes" : "no")
-              << ", candidate matching = " << (bruteForceLC ? "BRUTE FORCE" : "SearchByBoW")
-              << std::endl;
+    if (Verbose::on)
+        std::cout << "Loop closing: active = " << (activeLC ? "yes" : "no")
+                  << ", candidate matching = " << (bruteForceLC ? "BRUTE FORCE" : "SearchByBoW")
+                  << std::endl;
 
     mStrVocabularyFilePath = strVocFile;
 
@@ -121,7 +257,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     if(mStrLoadAtlasFromFile.empty())
     {
         //Load ORB Vocabulary
-        cout << endl << "Loading ORB Vocabulary. This could take a while..." << endl;
+        if (Verbose::on) cout << endl << "Loading ORB Vocabulary. This could take a while..." << endl;
 
         mpVocabulary = new ORBVocabulary();
         bool bVocLoad = mpVocabulary->loadFromTextFile(strVocFile);
@@ -131,19 +267,19 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
             cerr << "Falied to open at: " << strVocFile << endl;
             exit(-1);
         }
-        cout << "Vocabulary loaded!" << endl << endl;
+        if (Verbose::on) cout << "Vocabulary loaded!" << endl << endl;
 
         //Create KeyFrame Database
         mpKeyFrameDatabase = new KeyFrameDatabase(*mpVocabulary);
 
         //Create the Atlas
-        cout << "Initialization of Atlas from scratch " << endl;
+        if (Verbose::on) cout << "Initialization of Atlas from scratch " << endl;
         mpAtlas = new Atlas(0);
     }
     else
     {
         //Load ORB Vocabulary
-        cout << endl << "Loading ORB Vocabulary. This could take a while..." << endl;
+        if (Verbose::on) cout << endl << "Loading ORB Vocabulary. This could take a while..." << endl;
 
         mpVocabulary = new ORBVocabulary();
         bool bVocLoad = mpVocabulary->loadFromTextFile(strVocFile);
@@ -153,16 +289,16 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
             cerr << "Falied to open at: " << strVocFile << endl;
             exit(-1);
         }
-        cout << "Vocabulary loaded!" << endl << endl;
+        if (Verbose::on) cout << "Vocabulary loaded!" << endl << endl;
 
         //Create KeyFrame Database
         mpKeyFrameDatabase = new KeyFrameDatabase(*mpVocabulary);
 
-        cout << "Load File" << endl;
+        if (Verbose::on) cout << "Load File" << endl;
 
         // Load the file with an earlier session
         //clock_t start = clock();
-        cout << "Initialization of Atlas from file: " << mStrLoadAtlasFromFile << endl;
+        if (Verbose::on) cout << "Initialization of Atlas from file: " << mStrLoadAtlasFromFile << endl;
         bool isRead = LoadAtlas(FileType::BINARY_FILE);
 
         if(!isRead)
@@ -196,7 +332,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
 
     //Initialize the Tracking thread
     //(it will live in the main thread of execution, the one that called this constructor)
-    cout << "Seq. Name: " << strSequence << endl;
+    if (Verbose::on) cout << "Seq. Name: " << strSequence << endl;
     mpTracker = new Tracking(this, mpVocabulary, mpFrameDrawer, mpMapDrawer,
                              mpAtlas, mpKeyFrameDatabase, strSettingsFile, mSensor, settings_, strSequence);
 
@@ -211,7 +347,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
         mpLocalMapper->mThFarPoints = fsSettings["thFarPoints"];
     if(mpLocalMapper->mThFarPoints!=0)
     {
-        cout << "Discard points further than " << mpLocalMapper->mThFarPoints << " m from current camera" << endl;
+        if (Verbose::on) cout << "Discard points further than " << mpLocalMapper->mThFarPoints << " m from current camera" << endl;
         mpLocalMapper->mbFarPoints = true;
     }
     else
@@ -463,7 +599,7 @@ Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp, 
         }
         else if(mbResetActiveMap)
         {
-            cout << "SYSTEM-> Reseting active map in monocular case" << endl;
+            if (Verbose::on) cout << "SYSTEM-> Reseting active map in monocular case" << endl;
             mpTracker->ResetActiveMap();
             mbResetActiveMap = false;
         }
@@ -529,7 +665,7 @@ void System::Shutdown()
         mbShutDown = true;
     }
 
-    cout << "Shutdown" << endl;
+    if (Verbose::on) cout << "Shutdown" << endl;
 
     mpLocalMapper->RequestFinish();
     mpLoopCloser->RequestFinish();
@@ -568,6 +704,8 @@ void System::Shutdown()
     mpTracker->PrintTimeStats();
 #endif
 
+    // Save everything printed during the run (rewritten at exit to pick up later output)
+    Verbose::SaveLog("run.log");
 
 }
 
@@ -578,7 +716,7 @@ bool System::isShutDown() {
 
 void System::SaveTrajectoryTUM(const string &filename)
 {
-    cout << endl << "Saving camera trajectory to " << filename << " ..." << endl;
+    if (Verbose::on) cout << endl << "Saving camera trajectory to " << filename << " ..." << endl;
     if(mSensor==MONOCULAR)
     {
         cerr << "ERROR: SaveTrajectoryTUM cannot be used for monocular." << endl;
@@ -638,7 +776,7 @@ void System::SaveTrajectoryTUM(const string &filename)
 
 void System::SaveKeyFrameTrajectoryTUM(const string &filename)
 {
-    cout << endl << "Saving keyframe trajectory to " << filename << " ..." << endl;
+    if (Verbose::on) cout << endl << "Saving keyframe trajectory to " << filename << " ..." << endl;
 
     vector<KeyFrame*> vpKFs = mpAtlas->GetAllKeyFrames();
     sort(vpKFs.begin(),vpKFs.end(),KeyFrame::lId);
@@ -672,7 +810,7 @@ void System::SaveKeyFrameTrajectoryTUM(const string &filename)
 void System::SaveTrajectoryEuRoC(const string &filename)
 {
 
-    cout << endl << "Saving trajectory to " << filename << " ..." << endl;
+    if (Verbose::on) cout << endl << "Saving trajectory to " << filename << " ..." << endl;
     /*if(mSensor==MONOCULAR)
     {
         cerr << "ERROR: SaveTrajectoryEuRoC cannot be used for monocular." << endl;
@@ -682,10 +820,10 @@ void System::SaveTrajectoryEuRoC(const string &filename)
     vector<Map*> vpMaps = mpAtlas->GetAllMaps();
     int numMaxKFs = 0;
     Map* pBiggerMap;
-    std::cout << "There are " << std::to_string(vpMaps.size()) << " maps in the atlas" << std::endl;
+    if (Verbose::on) std::cout << "There are " << std::to_string(vpMaps.size()) << " maps in the atlas" << std::endl;
     for(Map* pMap :vpMaps)
     {
-        std::cout << "  Map " << std::to_string(pMap->GetId()) << " has " << std::to_string(pMap->GetAllKeyFrames().size()) << " KFs" << std::endl;
+        if (Verbose::on) std::cout << "  Map " << std::to_string(pMap->GetId()) << " has " << std::to_string(pMap->GetAllKeyFrames().size()) << " KFs" << std::endl;
         if(pMap->GetAllKeyFrames().size() > numMaxKFs)
         {
             numMaxKFs = pMap->GetAllKeyFrames().size();
@@ -783,13 +921,13 @@ void System::SaveTrajectoryEuRoC(const string &filename)
     }
     //cout << "end saving trajectory" << endl;
     f.close();
-    cout << endl << "End of saving trajectory to " << filename << " ..." << endl;
+    if (Verbose::on) cout << endl << "End of saving trajectory to " << filename << " ..." << endl;
 }
 
 void System::SaveTrajectoryEuRoC(const string &filename, Map* pMap)
 {
 
-    cout << endl << "Saving trajectory of map " << pMap->GetId() << " to " << filename << " ..." << endl;
+    if (Verbose::on) cout << endl << "Saving trajectory of map " << pMap->GetId() << " to " << filename << " ..." << endl;
     /*if(mSensor==MONOCULAR)
     {
         cerr << "ERROR: SaveTrajectoryEuRoC cannot be used for monocular." << endl;
@@ -888,7 +1026,7 @@ void System::SaveTrajectoryEuRoC(const string &filename, Map* pMap)
     }
     //cout << "end saving trajectory" << endl;
     f.close();
-    cout << endl << "End of saving trajectory to " << filename << " ..." << endl;
+    if (Verbose::on) cout << endl << "End of saving trajectory to " << filename << " ..." << endl;
 }
 
 /*void System::SaveTrajectoryEuRoC(const string &filename)
@@ -1066,7 +1204,7 @@ void System::SaveTrajectoryEuRoC(const string &filename, Map* pMap)
 
 void System::SaveKeyFrameTrajectoryEuRoC(const string &filename)
 {
-    cout << endl << "Saving keyframe trajectory to " << filename << " ..." << endl;
+    if (Verbose::on) cout << endl << "Saving keyframe trajectory to " << filename << " ..." << endl;
 
     vector<Map*> vpMaps = mpAtlas->GetAllMaps();
     Map* pBiggerMap;
@@ -1124,7 +1262,7 @@ void System::SaveKeyFrameTrajectoryEuRoC(const string &filename)
 
 void System::SaveKeyFrameTrajectoryEuRoC(const string &filename, Map* pMap)
 {
-    cout << endl << "Saving keyframe trajectory of map " << pMap->GetId() << " to " << filename << " ..." << endl;
+    if (Verbose::on) cout << endl << "Saving keyframe trajectory of map " << pMap->GetId() << " to " << filename << " ..." << endl;
 
     vector<KeyFrame*> vpKFs = pMap->GetAllKeyFrames();
     sort(vpKFs.begin(),vpKFs.end(),KeyFrame::lId);
@@ -1215,7 +1353,7 @@ void System::SaveKeyFrameTrajectoryEuRoC(const string &filename, Map* pMap)
 
 void System::SaveTrajectoryKITTI(const string &filename)
 {
-    cout << endl << "Saving camera trajectory to " << filename << " ..." << endl;
+    if (Verbose::on) cout << endl << "Saving camera trajectory to " << filename << " ..." << endl;
     if(mSensor==MONOCULAR)
     {
         cerr << "ERROR: SaveTrajectoryKITTI cannot be used for monocular." << endl;
@@ -1428,7 +1566,7 @@ void System::SaveAtlas(int type){
 
         if(type == TEXT_FILE) // File text
         {
-            cout << "Starting to write the save text file " << endl;
+            if (Verbose::on) cout << "Starting to write the save text file " << endl;
             std::remove(pathSaveFileName.c_str());
             std::ofstream ofs(pathSaveFileName, std::ios::binary);
             boost::archive::text_oarchive oa(ofs);
@@ -1436,18 +1574,18 @@ void System::SaveAtlas(int type){
             oa << strVocabularyName;
             oa << strVocabularyChecksum;
             oa << mpAtlas;
-            cout << "End to write the save text file" << endl;
+            if (Verbose::on) cout << "End to write the save text file" << endl;
         }
         else if(type == BINARY_FILE) // File binary
         {
-            cout << "Starting to write the save binary file" << endl;
+            if (Verbose::on) cout << "Starting to write the save binary file" << endl;
             std::remove(pathSaveFileName.c_str());
             std::ofstream ofs(pathSaveFileName, std::ios::binary);
             boost::archive::binary_oarchive oa(ofs);
             oa << strVocabularyName;
             oa << strVocabularyChecksum;
             oa << mpAtlas;
-            cout << "End to write save binary file" << endl;
+            if (Verbose::on) cout << "End to write save binary file" << endl;
         }
     }
 }
@@ -1463,7 +1601,7 @@ bool System::LoadAtlas(int type)
 
     if(type == TEXT_FILE) // File text
     {
-        cout << "Starting to read the save text file " << endl;
+        if (Verbose::on) cout << "Starting to read the save text file " << endl;
         std::ifstream ifs(pathLoadFileName, std::ios::binary);
         if(!ifs.good())
         {
@@ -1474,12 +1612,12 @@ bool System::LoadAtlas(int type)
         ia >> strFileVoc;
         ia >> strVocChecksum;
         ia >> mpAtlas;
-        cout << "End to load the save text file " << endl;
+        if (Verbose::on) cout << "End to load the save text file " << endl;
         isRead = true;
     }
     else if(type == BINARY_FILE) // File binary
     {
-        cout << "Starting to read the save binary file"  << endl;
+        if (Verbose::on) cout << "Starting to read the save binary file"  << endl;
         std::ifstream ifs(pathLoadFileName, std::ios::binary);
         if(!ifs.good())
         {
@@ -1490,7 +1628,7 @@ bool System::LoadAtlas(int type)
         ia >> strFileVoc;
         ia >> strVocChecksum;
         ia >> mpAtlas;
-        cout << "End to load the save binary file" << endl;
+        if (Verbose::on) cout << "End to load the save binary file" << endl;
         isRead = true;
     }
 
@@ -1556,4 +1694,3 @@ string System::CalculateCheckSum(string filename, int type)
 }
 
 } //namespace ORB_SLAM
-

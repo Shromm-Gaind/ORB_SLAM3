@@ -17,6 +17,7 @@
 */
 
 #include "Frame.h"
+#include "Verbose.h"
 
 #include "G2oTypes.h"
 #include "MapPoint.h"
@@ -600,7 +601,7 @@ bool Frame::ProjectPointDistort(MapPoint* pMP, cv::Point2f &kp, float &u, float 
     // Check positive depth
     if(PcZ<0.0f)
     {
-        cout << "Negative depth: " << PcZ << endl;
+        if (Verbose::on) cout << "Negative depth: " << PcZ << endl;
         return false;
     }
 

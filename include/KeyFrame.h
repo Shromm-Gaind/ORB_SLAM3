@@ -21,6 +21,7 @@
 #define KEYFRAME_H
 
 #include "MapPoint.h"
+#include "Verbose.h"
 #include "Thirdparty/DBoW2/DBoW2/BowVector.h"
 #include "Thirdparty/DBoW2/DBoW2/FeatureVector.h"
 #include "ORBVocabulary.h"
@@ -533,7 +534,7 @@ public:
                 else right++;
             }
         }
-        cout << "Point distribution in KeyFrame: left-> " << left << " --- right-> " << right << endl;
+        if (Verbose::on) cout << "Point distribution in KeyFrame: left-> " << left << " --- right-> " << right << endl;
     }
 
 

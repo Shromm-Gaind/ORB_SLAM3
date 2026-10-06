@@ -18,6 +18,7 @@
 
 
 #include "LoopClosing.h"
+#include "Verbose.h"
 
 #include "Sim3Solver.h"
 #include "Converter.h"
@@ -124,7 +125,7 @@ void LoopClosing::Run()
                     if ((mpTracker->mSensor==System::IMU_MONOCULAR || mpTracker->mSensor==System::IMU_STEREO || mpTracker->mSensor==System::IMU_RGBD) &&
                         (!mpCurrentKF->GetMap()->isImuInitialized()))
                     {
-                        cout << "IMU is not initilized, merge is aborted" << endl;
+                        if (Verbose::on) cout << "IMU is not initilized, merge is aborted" << endl;
                     }
                     else
                     {
@@ -140,7 +141,7 @@ void LoopClosing::Run()
 
                         if(mpCurrentKF->GetMap()->IsInertial() && mpMergeMatchedKF->GetMap()->IsInertial())
                         {
-                            cout << "Merge check transformation with IMU" << endl;
+                            if (Verbose::on) cout << "Merge check transformation with IMU" << endl;
                             if(mSold_new.scale()<0.90||mSold_new.scale()>1.1){
                                 mpMergeLastCurrentKF->SetErase();
                                 mpMergeMatchedKF->SetErase();
@@ -236,7 +237,7 @@ void LoopClosing::Run()
                         g2o::Sim3 g2oSww_new = g2oTwc*mg2oLoopScw;
 
                         Eigen::Vector3d phi = LogSO3(g2oSww_new.rotation().toRotationMatrix());
-                        cout << "phi = " << phi.transpose() << endl; 
+                        if (Verbose::on) cout << "phi = " << phi.transpose() << endl; 
                         if (fabs(phi(0))<0.008f && fabs(phi(1))<0.008f && fabs(phi(2))<0.349f)
                         {
                             if(mpCurrentKF->GetMap()->IsInertial())
@@ -255,7 +256,7 @@ void LoopClosing::Run()
                         }
                         else
                         {
-                            cout << "BAD LOOP!!!" << endl;
+                            if (Verbose::on) cout << "BAD LOOP!!!" << endl;
                             bGoodLoop = false;
                         }
 
@@ -398,7 +399,7 @@ bool LoopClosing::NewDetectCommonRegions()
 
             if(!mbLoopDetected)
             {
-                cout << "PR: Loop detected with Reffine Sim3" << endl;
+                if (Verbose::on) cout << "PR: Loop detected with Reffine Sim3" << endl;
             }
         }
         else
@@ -496,9 +497,10 @@ bool LoopClosing::NewDetectCommonRegions()
         vdDataQuery_ms.push_back(timeDataQuery);
 #endif
     }
-    std::cout << "[LC] KF=" << mpCurrentKF->mnId
-    << " loopCand=" << vpLoopBowCand.size()
-    << " mergeCand=" << vpMergeBowCand.size() << std::endl;
+    if (Verbose::on)
+        std::cout << "[LC] KF=" << mpCurrentKF->mnId
+        << " loopCand=" << vpLoopBowCand.size()
+        << " mergeCand=" << vpMergeBowCand.size() << std::endl;
 
 #ifdef REGISTER_TIMES
         std::chrono::steady_clock::time_point time_StartEstSim3_2 = std::chrono::steady_clock::now();
@@ -618,7 +620,7 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
         std::vector<KeyFrame*> vpCovKFi = pKFi->GetBestCovisibilityKeyFrames(nNumCovisibles);
         if(vpCovKFi.empty())
         {
-            std::cout << "Covisible list empty" << std::endl;
+            if (Verbose::on) std::cout << "Covisible list empty" << std::endl;
             vpCovKFi.push_back(pKFi);
         }
         else
@@ -672,11 +674,12 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
             }
 
         }
-        std::cout << "[LC] curKF=" << mpCurrentKF->mnId
-        << " cand=" << pKFi->mnId
-        << " covKFs=" << vpCovKFi.size()
-        << " bestBoW=" << nMostBoWNumMatches
-        << " gate=" << nBoWMatches << std::endl;
+        if (Verbose::on)
+            std::cout << "[LC] curKF=" << mpCurrentKF->mnId
+            << " cand=" << pKFi->mnId
+            << " covKFs=" << vpCovKFi.size()
+            << " bestBoW=" << nMostBoWNumMatches
+            << " gate=" << nBoWMatches << std::endl;
 
         for(int j=0; j<vpCovKFi.size(); ++j)
         {
@@ -708,6 +711,7 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
         if(!vpCovKFi.empty() && nIndexMostBoWMatchesKF < (int)vpCovKFi.size()
            && vpCovKFi[nIndexMostBoWMatchesKF] && !vpCovKFi[nIndexMostBoWMatchesKF]->isBad())
             pMostBoWMatchesKF = vpCovKFi[nIndexMostBoWMatchesKF];
+        if (Verbose::on)
         {   // how many BoW matches actually survive Sim3Solver's filter
             int nValid = 0;
             const std::vector<MapPoint*> vpMP1 = mpCurrentKF->GetMapPointMatches();
@@ -724,8 +728,9 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                       << " (need " << nBoWInliers << ")" << std::endl;
         }
 
-        std::cout << "[LC]   numBoWMatches=" << numBoWMatches
-                  << (numBoWMatches >= nBoWMatches ? "  -> SIM3" : "  -> REJECT") << std::endl;
+        if (Verbose::on)
+            std::cout << "[LC]   numBoWMatches=" << numBoWMatches
+                      << (numBoWMatches >= nBoWMatches ? "  -> SIM3" : "  -> REJECT") << std::endl;
 
         if(numBoWMatches >= nBoWMatches) // TODO pick a good threshold
         {
@@ -747,12 +752,13 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                 mTcm = solver.iterate(20,bNoMore, vbInliers, nInliers, bConverge);
                 //Verbose::PrintMess("BoW guess: Solver achieve " + to_string(nInliers) + " geometrical inliers among " + to_string(nBoWInliers) + " BoW matches", Verbose::VERBOSITY_DEBUG);
             }
-            std::cout << "[LC]   cand=" << pMostBoWMatchesKF->mnId
-            << " sim3 " << (bConverge ? "CONVERGE" : "FAIL")
-            << " inliers=" << nInliers
-            << " curKFmps=" << mpCurrentKF->TrackedMapPoints(1)
-            << " candKFmps=" << pMostBoWMatchesKF->TrackedMapPoints(1)
-            << std::endl;
+            if (Verbose::on)
+                std::cout << "[LC]   cand=" << pMostBoWMatchesKF->mnId
+                << " sim3 " << (bConverge ? "CONVERGE" : "FAIL")
+                << " inliers=" << nInliers
+                << " curKFmps=" << mpCurrentKF->TrackedMapPoints(1)
+                << " candKFmps=" << pMostBoWMatchesKF->TrackedMapPoints(1)
+                << std::endl;
             if(bConverge)
             {
                 //std::cout << "Check BoW: SolverSim3 converged" << std::endl;
@@ -799,12 +805,13 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                 int numProjMatches = matcher.SearchByProjection(mpCurrentKF, mScw, vpMapPoints, vpKeyFrames, vpMatchedMP, vpMatchedKF, 8, 1.5);
                 //cout <<"BoW: " << numProjMatches << " matches between " << vpMapPoints.size() << " points with coarse Sim3" << endl;
 
-                std::cout << "[LC]   cand=" << pMostBoWMatchesKF->mnId
-                << " sim3Inliers=" << nInliers
-                << " projMatches=" << numProjMatches
-                << " (gate=" << nProjMatches << ")"
-                << (numProjMatches >= nProjMatches ? " -> OPT" : " -> STOP")
-                << std::endl;
+                if (Verbose::on)
+                    std::cout << "[LC]   cand=" << pMostBoWMatchesKF->mnId
+                    << " sim3Inliers=" << nInliers
+                    << " projMatches=" << numProjMatches
+                    << " (gate=" << nProjMatches << ")"
+                    << (numProjMatches >= nProjMatches ? " -> OPT" : " -> STOP")
+                    << std::endl;
 
                 if(numProjMatches >= nProjMatches)
                 {
@@ -816,8 +823,9 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                         bFixedScale=false;
 
                     int numOptMatches = Optimizer::OptimizeSim3(mpCurrentKF, pMostBoWMatchesKF, vpMatchedMP, gScm, 10, mbFixScale, mHessian7x7, true);
-                    std::cout << "[LC]     optMatches=" << numOptMatches
-                              << " (gate=" << nSim3Inliers << ")" << std::endl;
+                    if (Verbose::on)
+                        std::cout << "[LC]     optMatches=" << numOptMatches
+                                  << " (gate=" << nSim3Inliers << ")" << std::endl;
 
                     if(numOptMatches >= nSim3Inliers)
                     {
@@ -892,9 +900,10 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                                 }
                                 j++;
                             }
-                            std::cout << "[LC]     projOpt=" << numProjOptMatches
-                            << " (gate=" << nProjOptMatches << ")"
-                            << " nNumKFs=" << nNumKFs << "/3" << std::endl;
+                            if (Verbose::on)
+                                std::cout << "[LC]     projOpt=" << numProjOptMatches
+                                << " (gate=" << nProjOptMatches << ")"
+                                << " nNumKFs=" << nNumKFs << "/3" << std::endl;
 
                             if(nNumKFs < 3)
                             {
@@ -915,7 +924,7 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                     }
                 }
             }
-            else
+            else if (Verbose::on)
                 std::cout << "[LC]   cand=" << pMostBoWMatchesKF->mnId
                           << " sim3 NO CONVERGE" << std::endl;
         }
@@ -1035,7 +1044,7 @@ void LoopClosing::CorrectLoop()
     // If a Global Bundle Adjustment is running, abort it
     if(isRunningGBA())
     {
-        cout << "Stoping Global Bundle Adjustment...";
+        if (Verbose::on) cout << "Stoping Global Bundle Adjustment...";
         unique_lock<mutex> lock(mMutexGBA);
         mbStopGBA = true;
 
@@ -1046,7 +1055,7 @@ void LoopClosing::CorrectLoop()
             mpThreadGBA->detach();
             delete mpThreadGBA;
         }
-        cout << "  Done!!" << endl;
+        if (Verbose::on) cout << "  Done!!" << endl;
     }
 
     // Wait until Local Mapping has effectively stopped
@@ -2121,7 +2130,7 @@ void LoopClosing::MergeLocal2()
 
 void LoopClosing::CheckObservations(set<KeyFrame*> &spKFsMap1, set<KeyFrame*> &spKFsMap2)
 {
-    cout << "----------------------" << endl;
+    if (Verbose::on) cout << "----------------------" << endl;
     for(KeyFrame* pKFi1 : spKFsMap1)
     {
         map<KeyFrame*, int> mMatchedMP;
@@ -2154,18 +2163,18 @@ void LoopClosing::CheckObservations(set<KeyFrame*> &spKFsMap1, set<KeyFrame*> &s
 
         if(mMatchedMP.size() == 0)
         {
-            cout << "CHECK-OBS: KF " << pKFi1->mnId << " has not any matched MP with the other map" << endl;
+            if (Verbose::on) cout << "CHECK-OBS: KF " << pKFi1->mnId << " has not any matched MP with the other map" << endl;
         }
         else
         {
-            cout << "CHECK-OBS: KF " << pKFi1->mnId << " has matched MP with " << mMatchedMP.size() << " KF from the other map" << endl;
+            if (Verbose::on) cout << "CHECK-OBS: KF " << pKFi1->mnId << " has matched MP with " << mMatchedMP.size() << " KF from the other map" << endl;
             for(pair<KeyFrame*, int> matchedKF : mMatchedMP)
             {
-                cout << "   -KF: " << matchedKF.first->mnId << ", Number of matches: " << matchedKF.second << endl;
+                if (Verbose::on) cout << "   -KF: " << matchedKF.first->mnId << ", Number of matches: " << matchedKF.second << endl;
             }
         }
     }
-    cout << "----------------------" << endl;
+    if (Verbose::on) cout << "----------------------" << endl;
 }
 
 
@@ -2296,7 +2305,7 @@ void LoopClosing::ResetIfRequested()
     unique_lock<mutex> lock(mMutexReset);
     if(mbResetRequested)
     {
-        cout << "Loop closer reset requested..." << endl;
+        if (Verbose::on) cout << "Loop closer reset requested..." << endl;
         mlpLoopKeyFrameQueue.clear();
         mLastLoopKFid=0;  //TODO old variable, it is not use in the new algorithm
         mbResetRequested=false;

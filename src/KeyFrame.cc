@@ -17,6 +17,7 @@
 */
 
 #include "KeyFrame.h"
+#include "Verbose.h"
 #include "Converter.h"
 #include "ImuTypes.h"
 #include<mutex>
@@ -422,11 +423,11 @@ void KeyFrame::UpdateConnections(bool upParent)
 
     vector<pair<int,KeyFrame*> > vPairs;
     vPairs.reserve(KFcounter.size());
-    if(!upParent)
+    if(Verbose::on && !upParent)
         cout << "UPDATE_CONN: current KF " << mnId << endl;
     for(map<KeyFrame*,int>::iterator mit=KFcounter.begin(), mend=KFcounter.end(); mit!=mend; mit++)
     {
-        if(!upParent)
+        if(Verbose::on && !upParent)
             cout << "  UPDATE_CONN: KF " << mit->first->mnId << " ; num matches: " << mit->second << endl;
         if(mit->second>nmax)
         {
@@ -1023,7 +1024,7 @@ bool KeyFrame::ProjectPointDistort(MapPoint* pMP, cv::Point2f &kp, float &u, flo
     // Check positive depth
     if(PcZ<0.0f)
     {
-        cout << "Negative depth: " << PcZ << endl;
+        if (Verbose::on) cout << "Negative depth: " << PcZ << endl;
         return false;
     }
 
@@ -1086,7 +1087,7 @@ bool KeyFrame::ProjectPointUnDistort(MapPoint* pMP, cv::Point2f &kp, float &u, f
     // Check positive depth
     if(PcZ<0.0f)
     {
-        cout << "Negative depth: " << PcZ << endl;
+        if (Verbose::on) cout << "Negative depth: " << PcZ << endl;
         return false;
     }
 

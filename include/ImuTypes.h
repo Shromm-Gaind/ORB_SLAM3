@@ -30,6 +30,7 @@
 #include <mutex>
 
 #include "SerializationUtils.h"
+#include "Verbose.h"
 
 #include <boost/serialization/serialization.hpp>
 #include <boost/serialization/vector.hpp>
@@ -200,11 +201,11 @@ public:
     Bias GetUpdatedBias();
 
     void printMeasurements() const {
-        std::cout << "pint meas:\n";
+        if (Verbose::on) std::cout << "pint meas:\n";
         for(int i=0; i<mvMeasurements.size(); i++){
-            std::cout << "meas " << mvMeasurements[i].t << std::endl;
+            if (Verbose::on) std::cout << "meas " << mvMeasurements[i].t << std::endl;
         }
-        std::cout << "end pint meas:\n";
+        if (Verbose::on) std::cout << "end pint meas:\n";
     }
 
 public:

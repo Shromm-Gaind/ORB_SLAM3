@@ -23,6 +23,7 @@
 #include<vector>
 
 #include "Thirdparty/DBoW2/DBoW2/BowVector.h"
+#include "Verbose.h"
 #include "Thirdparty/DBoW2/DBoW2/FeatureVector.h"
 
 #include "Thirdparty/Sophus/sophus/geometry.hpp"
@@ -378,7 +379,7 @@ public:
                 else right++;
             }
         }
-        cout << "Point distribution in Frame: left-> " << left << " --- right-> " << right << endl;
+        if (Verbose::on) cout << "Point distribution in Frame: left-> " << left << " --- right-> " << right << endl;
     }
 
     Sophus::SE3<double> T_test;
