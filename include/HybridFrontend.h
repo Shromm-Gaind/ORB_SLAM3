@@ -1,6 +1,25 @@
-// C++ port of hybrid_frontend.py: the stateful per-frame pipeline
-// implementing Steps 1-5 of the hybrid frontend (design doc §4).
-//
+/**
+ * This file is part of ORB-SLAM3
+ *
+ * Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. Gómez Rodríguez, José M.M. Montiel and Juan D. Tardós,
+ * University of Zaragoza. Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of
+ * Zaragoza.
+ *
+ * Modifications Copyright (C) 2026 Shromm Gaind. Work done as a honours student at Griffith University
+ * Modified 2026: hybrid KLT/Shi-Tomasi front end backend is left untouched.
+ *
+ * ORB-SLAM3 is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+ * License as published by the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * ORB-SLAM3 is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even
+ * the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with ORB-SLAM3.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
 //   Step 1  KLT forward tracking of active features
 //   Step 2  forward-backward consistency filter
 //   Step 3  RANSAC fundamental-matrix outlier rejection
@@ -9,18 +28,6 @@
 //   Step 5  re-ID of new corners against the DormantTrackBuffer via
 //           SpatialDescriptorMatch (gap-scaled θ_reid, distinctiveness
 //           margin, unique candidates)
-//
-// Dependencies: OpenCV (core, imgproc, video, features2d, calib3d) and
-// the two sibling modules. NO ORB-SLAM3 dependency — this class is the
-// engine; Tracking.cc integration is a thin caller (see
-// TRACKING_INTEGRATION.md).
-//
-// Faithful-port notes: semantics follow hybrid_frontend.py exactly,
-// including step ordering (purge → KLT/FB/RANSAC → motion-compensate
-// dormant → deaths buffered flow-adjusted → top-up → re-ID under a
-// deficit budget with resurrections first). Python's diagnostics-only
-// instrumentation (per-query candidate counts, drift histograms) is not
-// ported; per-frame counts and events are.
 
 #pragma once
 
@@ -269,6 +276,29 @@ private:
     std::vector<cv::Mat> pyr_prev_, pyr_curr_;
     std::vector<int> umax_;
     cv::Ptr<cv::ORB> orb_;
+
+    // ---- per-frame descriptor cache --------------------------------
+    // Every cv::ORB::compute call rebuilds and blurs a full image
+    // pyramid, whatever the number of keypoints, so the frontend makes
+    // ONE pass per frame over all active tracks at their current
+    // positions and reuses it for:
+    //   - describe_current()            (what the Frame consumes)
+    //   - representative-descriptor samples for this frame's survivors
+    //   - next frame's death descriptors and force_kill(): a dying
+    //     track's "last successful observation" is exactly its entry
+    //     here from the frame before.
+    // The values are the ones the separate calls used to produce: same
+    // image, position, octave and IC angle.
+    struct CurrentDescriptor {
+        cv::KeyPoint kp;       // as returned by ORB (angle, size, octave set)
+        Descriptor256 desc{};
+    };
+    // Tracks whose patch leaves the image have no entry.
+    std::unordered_map<std::uint64_t, CurrentDescriptor> current_desc_;
+    bool current_desc_valid_ = false;
+    std::uint64_t current_desc_frame_ = 0;   // frame_index_ it was computed for
+    // Fill current_desc_ for the last processed frame unless already done.
+    void ensure_current_descriptors();
 };
 
 }  // namespace hybrid_frontend

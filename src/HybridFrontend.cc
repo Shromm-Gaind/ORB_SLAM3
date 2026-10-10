@@ -1,5 +1,24 @@
-// HybridFrontend.cc — see HybridFrontend.h. Port of hybrid_frontend.py;
-// section markers below reference the Python structure.
+/**
+ * This file is part of ORB-SLAM3
+ *
+ * Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. Gómez Rodríguez, José M.M. Montiel and Juan D. Tardós,
+ * University of Zaragoza. Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of
+ * Zaragoza.
+ *
+ * Modifications Copyright (C) 2026 Shromm Gaind. Work done as a honours student at Griffith University
+ * Modified 2026: hybrid KLT/Shi-Tomasi front end backend is left untouched.
+ *
+ * ORB-SLAM3 is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+ * License as published by the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * ORB-SLAM3 is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even
+ * the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with ORB-SLAM3.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
 
 #include "HybridFrontend.h"
 
@@ -12,6 +31,7 @@
 #include <list>
 
 #include <opencv2/calib3d.hpp>
+#include <opencv2/core/utility.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/video/tracking.hpp>
 
@@ -262,7 +282,13 @@ std::vector<cv::Mat> build_pyramid(const cv::Mat& gray, float scale_factor,
 // 7x7 NMS peaks above a low noise floor (0.01*quality*level_max), then
 // the per-level geometric target enforced by the quadtree. Returns
 // LEVEL-0 coordinates with octave, size = patch*sf^octave, response =
-// lambda2. `level0_eig` is the caller's shared cornerMinEigenVal map.
+// lambda2. `level0_eig` is the level-0 cornerMinEigenVal map shared with
+// the caller (Step 5 local detection reads it): if it is empty on entry
+// it is computed here, as part of the level-0 work, and returned.
+// The pyramid levels are independent of each other, so they are
+// processed in parallel (cv::parallel_for_); the per-level results are
+// concatenated in level order, so the output does not depend on the
+// number of threads.
 // The occupancy mask is applied per level via nearest resize; the
 // priority (dormant-seeding) split runs per level on lifted coords.
 // NOTE (faithful quirk): the quadtree receives the ROI dimensions
@@ -271,7 +297,7 @@ std::vector<cv::Mat> build_pyramid(const cv::Mat& gray, float scale_factor,
 // selection behaviour and is preserved deliberately.
 std::vector<cv::KeyPoint> detect_multiscale_shi_tomasi(
         const cv::Mat& gray, const std::vector<cv::Mat>& pyr,
-        const cv::Mat& level0_eig,
+        cv::Mat& level0_eig,
         const cv::Mat& mask, int target_n, const HybridConfig& cfg,
         const cv::Mat* priority_map) {
     const float sf = cfg.descriptor_scale_factor;
@@ -283,20 +309,25 @@ std::vector<cv::KeyPoint> detect_multiscale_shi_tomasi(
     (void)gray;   // level 0 is pyr[0]
     const auto targets = level_target_counts(target_n, nlevels,
                                              static_cast<double>(sf));
-    std::vector<cv::KeyPoint> all;
     const cv::Mat nms_kernel = cv::Mat::ones(2 * nms_r + 1,
                                              2 * nms_r + 1, CV_8U);
-    for (int lvl = 0; lvl < nlevels; ++lvl) {
+    // One slot per level; each parallel task writes only its own slot
+    // (and, for level 0, level0_eig).
+    std::vector<std::vector<cv::KeyPoint>> per_level(
+        static_cast<std::size_t>(nlevels));
+    auto process_level = [&](int lvl) {
         const cv::Mat& img = pyr[static_cast<std::size_t>(lvl)];
         const int h = img.rows, w = img.cols;
-        if (w <= 2 * edge || h <= 2 * edge) continue;
+        if (w <= 2 * edge || h <= 2 * edge) return;
 
         cv::Mat lam;
-        if (lvl == 0 && block == cfg.shi_tomasi_block_size &&
-            !level0_eig.empty())
+        if (lvl == 0) {
+            if (level0_eig.empty())
+                cv::cornerMinEigenVal(img, level0_eig, block);
             lam = level0_eig;
-        else
+        } else {
             cv::cornerMinEigenVal(img, lam, block);
+        }
 
         cv::Mat lmask;
         if (lvl == 0) lmask = mask;
@@ -384,8 +415,16 @@ std::vector<cv::KeyPoint> detect_multiscale_shi_tomasi(
             kp.octave = lvl;
             kp.size = static_cast<float>(cfg.descriptor_patch_size) * s;
         }
-        all.insert(all.end(), keep.begin(), keep.end());
-    }
+        per_level[static_cast<std::size_t>(lvl)] = std::move(keep);
+    };
+    cv::parallel_for_(cv::Range(0, nlevels), [&](const cv::Range& range) {
+        for (int lvl = range.start; lvl < range.end; ++lvl)
+            process_level(lvl);
+    }, static_cast<double>(nlevels));
+
+    std::vector<cv::KeyPoint> all;
+    for (const auto& kps : per_level)
+        all.insert(all.end(), kps.begin(), kps.end());
     return all;
 }
 
@@ -710,24 +749,28 @@ void HybridFrontend::initialize(const cv::Mat& first_gray) {
     active_tracks_.clear();
     active_order_.clear();
     dormant_buffer_.clear();
+    current_desc_.clear();
+    current_desc_valid_ = false;
     cv::Mat full_mask(first_gray.size(), CV_8U, cv::Scalar(255));
     pyr_prev_ = build_pyramid(first_gray, cfg_.descriptor_scale_factor,
                               std::max(1, cfg_.descriptor_levels),
                               cfg_.descriptor_patch_size / 2);
     cv::Mat eig;
-    cv::cornerMinEigenVal(first_gray, eig, cfg_.shi_tomasi_block_size);
     std::vector<cv::KeyPoint> kps;
-    if (cfg_.multiscale_detection)
+    if (cfg_.multiscale_detection) {
+        // eig is computed by the level-0 task of the parallel detection
         kps = detect_multiscale_shi_tomasi(first_gray, pyr_prev_, eig,
                                            full_mask,
                                            cfg_.target_active_tracks,
                                            cfg_, nullptr);
-    else
+    } else {
+        cv::cornerMinEigenVal(first_gray, eig, cfg_.shi_tomasi_block_size);
         kps = detect_shi_tomasi_with_quadtree(
             first_gray, eig, full_mask, cfg_.target_active_tracks,
             cfg_.shi_tomasi_quality, cfg_.shi_tomasi_min_distance,
             cfg_.shi_tomasi_block_size, nullptr,
             cfg_.target_active_tracks * 2);
+    }
     std::vector<cv::KeyPoint> kept;
     cv::Mat desc;
     compute_steered_brief(first_gray, kps, orb_,
@@ -766,6 +809,14 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
     res.tracks_in = static_cast<int>(active_tracks_.size());
     float flow_dx = 0.0f, flow_dy = 0.0f;
 
+    // current_desc_ still holds the PREVIOUS frame's descriptors here
+    // (if a pass was made for it); the death step below reads them.
+    const bool have_prev_desc =
+        current_desc_valid_ && current_desc_frame_ + 1 == frame_index_;
+    // Survivors due for a representative-descriptor sample this frame;
+    // applied at the end of the frame from the shared descriptor pass.
+    std::vector<std::uint64_t> rep_sampled;
+
     // ============ Steps 1-3: KLT, FB filter, RANSAC =================
     if (!active_tracks_.empty()) {
         const std::vector<std::uint64_t> ids = active_order_;
@@ -782,12 +833,13 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
             cv::TermCriteria::EPS | cv::TermCriteria::COUNT,
             cfg.klt_max_iter, cfg.klt_eps);
         cv::calcOpticalFlowPyrLK(prev_gray_, curr_gray, prev_pts, curr_pts,
-                                 st_fwd, err, cfg.klt_window,
-                                 cfg.klt_pyramid_levels, crit);
+                st_fwd, err, cfg.klt_window,
+                cfg.klt_pyramid_levels, crit,
+                0, 1e-6);   // flags, minEigThreshold
         cv::calcOpticalFlowPyrLK(curr_gray, prev_gray_, curr_pts, back_pts,
-                                 st_bwd, err, cfg.klt_window,
-                                 cfg.klt_pyramid_levels, crit);
-
+                st_bwd, err, cfg.klt_window,
+                cfg.klt_pyramid_levels, crit,
+                0, 1e-6);
         const std::size_t n = ids.size();
         std::vector<bool> surv(n, false);
         int n_klt = 0, n_fb = 0;
@@ -866,32 +918,16 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
             // for a sample this frame need a descriptor computed.
             const std::uint32_t stride = static_cast<std::uint32_t>(
                 std::max(1, cfg.representative_sample_stride));
-            std::vector<std::uint64_t> sampled;
-            std::vector<cv::Point2f> pos;
-            std::vector<int> oct;
+            // Only the SELECTION happens here. The descriptors come from
+            // the single end-of-frame pass (see the end of this
+            // function): a survivor's position does not change again
+            // this frame and nothing in between reads its history, so
+            // the sample is the same one a dedicated ORB call here would
+            // produce, without paying for another pyramid.
             for (std::uint64_t id : kept_ids) {
                 const ActiveTrack& t = active_tracks_.at(id);
                 if (t.age % stride != 0) continue;
-                sampled.push_back(id);
-                pos.emplace_back(t.x, t.y);
-                oct.push_back(t.octave);
-            }
-            auto fresh = descriptors_at_positions(
-                curr_gray, pos, oct, orb_, cfg.descriptor_patch_size,
-                cfg.descriptor_scale_factor, pyr_curr_, umax_);
-            for (const auto& kv : fresh) {
-                ActiveTrack& t = active_tracks_.at(
-                    sampled[static_cast<std::size_t>(kv.first)]);
-                t.descriptor_history.push_back(kv.second);
-                if (static_cast<int>(t.descriptor_history.size()) >
-                    cfg.representative_max_observations)
-                    // Drop the OLDEST non-birth observation; index 0 is
-                    // the birth appearance, kept as an anchor.
-                    t.descriptor_history.erase(
-                        t.descriptor_history.begin() + 1);
-                t.representative_descriptor =
-                    representative_descriptor(t.descriptor_history);
-                t.has_representative = true;
+                rep_sampled.push_back(id);
             }
         }
 
@@ -913,22 +949,39 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
             // wasted cost per frame.
             const std::uint32_t min_age = static_cast<std::uint32_t>(
                 std::max(0, cfg.dormant_min_track_age));
-            std::vector<cv::Point2f> dpos;
-            std::vector<int> doct;
-            std::vector<std::size_t> dmap;   // dpos index -> dying index
-            for (std::size_t k = 0; k < dying.size(); ++k) {
-                const ActiveTrack& t = active_tracks_.at(dying[k]);
-                if (t.age < min_age || t.map_point != nullptr) continue;
-                dmap.push_back(k);
-                dpos.emplace_back(t.x, t.y);
-                doct.push_back(t.octave);
-            }
-            auto desc_by_pos = descriptors_at_positions(
-                prev_gray_, dpos, doct, orb_, cfg.descriptor_patch_size,
-                cfg.descriptor_scale_factor, pyr_prev_, umax_);
             std::unordered_map<std::size_t, Descriptor256> death_desc;
-            for (const auto& kv : desc_by_pos)
-                death_desc[dmap[static_cast<std::size_t>(kv.first)]] = kv.second;
+            if (have_prev_desc) {
+                // The previous frame's pass already described every
+                // track at the position it still holds (a dying track
+                // was not moved this frame). A track with no entry had
+                // its patch outside the image, which is also the case
+                // in which a fresh ORB call returns nothing for it.
+                for (std::size_t k = 0; k < dying.size(); ++k) {
+                    const ActiveTrack& t = active_tracks_.at(dying[k]);
+                    if (t.age < min_age || t.map_point != nullptr) continue;
+                    const auto it = current_desc_.find(dying[k]);
+                    if (it != current_desc_.end())
+                        death_desc[k] = it->second.desc;
+                }
+            } else {
+                // No pass was made for the previous frame: describe the
+                // dying tracks on it directly.
+                std::vector<cv::Point2f> dpos;
+                std::vector<int> doct;
+                std::vector<std::size_t> dmap;   // dpos index -> dying index
+                for (std::size_t k = 0; k < dying.size(); ++k) {
+                    const ActiveTrack& t = active_tracks_.at(dying[k]);
+                    if (t.age < min_age || t.map_point != nullptr) continue;
+                    dmap.push_back(k);
+                    dpos.emplace_back(t.x, t.y);
+                    doct.push_back(t.octave);
+                }
+                auto desc_by_pos = descriptors_at_positions(
+                    prev_gray_, dpos, doct, orb_, cfg.descriptor_patch_size,
+                    cfg.descriptor_scale_factor, pyr_prev_, umax_);
+                for (const auto& kv : desc_by_pos)
+                    death_desc[dmap[static_cast<std::size_t>(kv.first)]] = kv.second;
+            }
             for (std::size_t k = 0; k < dying.size(); ++k) {
                 const std::uint64_t tid = dying[k];
                 ActiveTrack t = active_tracks_.at(tid);
@@ -985,10 +1038,13 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
     const int deficit_floor = static_cast<int>(std::lround(
         cfg.min_deficit_fraction * cfg.target_active_tracks));
     if (deficit > 0 && deficit >= deficit_floor) {
-        // ONE cornerMinEigenVal pass per frame, shared by Step 4
-        // response sampling and Step 5 local detection.
+        // ONE level-0 cornerMinEigenVal map per frame, shared by Step 4
+        // response sampling and Step 5 local detection. With multiscale
+        // detection it is computed inside the parallel per-level pass;
+        // otherwise here.
         cv::Mat eig;
-        cv::cornerMinEigenVal(curr_gray, eig, cfg.shi_tomasi_block_size);
+        if (!cfg.multiscale_detection)
+            cv::cornerMinEigenVal(curr_gray, eig, cfg.shi_tomasi_block_size);
         cv::Mat mask = build_occupancy_mask(curr_gray.size(), active_tracks_,
                                             active_order_,
                                             cfg.occupancy_mask_radius);
@@ -1156,6 +1212,28 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
 
     prev_gray_ = curr_gray.clone();
     pyr_prev_.swap(pyr_curr_);   // pyr_prev_ now matches prev_gray_
+
+    // The cache described the previous frame until now.
+    current_desc_valid_ = false;
+    if (cfg.use_representative_descriptor && !rep_sampled.empty()) {
+        ensure_current_descriptors();
+        for (std::uint64_t id : rep_sampled) {
+            const auto it = current_desc_.find(id);
+            if (it == current_desc_.end()) continue;   // patch off-image
+            ActiveTrack& t = active_tracks_.at(id);
+            t.descriptor_history.push_back(it->second.desc);
+            if (static_cast<int>(t.descriptor_history.size()) >
+                cfg.representative_max_observations)
+                // Drop the OLDEST non-birth observation; index 0 is
+                // the birth appearance, kept as an anchor.
+                t.descriptor_history.erase(
+                    t.descriptor_history.begin() + 1);
+            t.representative_descriptor =
+                representative_descriptor(t.descriptor_history);
+            t.has_representative = true;
+        }
+    }
+
     res.tracks_out = static_cast<int>(active_tracks_.size());
     res.dormant_buffer_size = dormant_buffer_.size();
     res.median_flow_dx = flow_dx;
@@ -1184,9 +1262,20 @@ std::vector<DeathRecord> HybridFrontend::force_kill(
         pos.emplace_back(it->second.x, it->second.y);
         oct.push_back(it->second.octave);
     }
-    auto death_desc = descriptors_at_positions(
-        prev_gray_, pos, oct, orb_, cfg_.descriptor_patch_size,
-        cfg_.descriptor_scale_factor, pyr_prev_, umax_);
+    // victim index -> descriptor at its current position. Taken from
+    // this frame's descriptor pass when there is one.
+    std::unordered_map<int, Descriptor256> death_desc;
+    if (current_desc_valid_ && current_desc_frame_ == frame_index_) {
+        for (std::size_t k = 0; k < victims.size(); ++k) {
+            const auto it = current_desc_.find(victims[k]);
+            if (it != current_desc_.end())
+                death_desc[static_cast<int>(k)] = it->second.desc;
+        }
+    } else {
+        death_desc = descriptors_at_positions(
+            prev_gray_, pos, oct, orb_, cfg_.descriptor_patch_size,
+            cfg_.descriptor_scale_factor, pyr_prev_, umax_);
+    }
     std::vector<DeathRecord> killed;
     for (std::size_t k = 0; k < victims.size(); ++k) {
         const std::uint64_t tid = victims[k];
@@ -1216,6 +1305,45 @@ std::vector<DeathRecord> HybridFrontend::force_kill(
     return killed;
 }
 
+void HybridFrontend::ensure_current_descriptors() {
+    if (current_desc_valid_ && current_desc_frame_ == frame_index_) return;
+    current_desc_.clear();
+    current_desc_valid_ = true;
+    current_desc_frame_ = frame_index_;
+    if (active_tracks_.empty()) return;
+
+    // Every active track at its CURRENT position in the LAST PROCESSED
+    // frame (prev_gray_ / pyr_prev_ once process_frame has run). Only
+    // ORB's own border filter applies here; describe_current() adds its
+    // stricter margin when it reads the cache.
+    std::vector<cv::KeyPoint> kps;
+    kps.reserve(active_order_.size());
+    for (std::size_t i = 0; i < active_order_.size(); ++i) {
+        const ActiveTrack& t = active_tracks_.at(active_order_[i]);
+        const float sc = std::pow(cfg_.descriptor_scale_factor,
+                                  static_cast<float>(t.octave));
+        cv::KeyPoint kp(t.x, t.y,
+                        static_cast<float>(cfg_.descriptor_patch_size) * sc);
+        kp.octave = t.octave;
+        kp.class_id = static_cast<int>(i);
+        kps.push_back(kp);
+    }
+    assign_ic_angles(kps, pyr_prev_, cfg_.descriptor_scale_factor, umax_);
+    cv::Mat desc;
+    orb_->compute(prev_gray_, kps, desc);   // drops border keypoints
+    if (desc.empty()) return;
+
+    current_desc_.reserve(kps.size());
+    for (std::size_t r = 0; r < kps.size(); ++r) {
+        const int src = kps[r].class_id;
+        if (src < 0 || src >= static_cast<int>(active_order_.size())) continue;
+        CurrentDescriptor cd;
+        cd.kp = kps[r];
+        cd.desc = to_desc(desc.row(static_cast<int>(r)));
+        current_desc_.emplace(active_order_[static_cast<std::size_t>(src)], cd);
+    }
+}
+
 void HybridFrontend::describe_current(std::vector<std::uint64_t>& ids,
                                       std::vector<cv::KeyPoint>& keypoints,
                                       cv::Mat& descriptors) {
@@ -1224,19 +1352,23 @@ void HybridFrontend::describe_current(std::vector<std::uint64_t>& ids,
     descriptors.release();
     if (!initialized_ || active_tracks_.empty()) return;
 
+    // Fresh descriptors at CURRENT positions in the LAST PROCESSED frame.
+    // This is what stock ORB-SLAM3 does every frame; a birth-time or
+    // medoid descriptor at a position the track occupied frames ago is
+    // the wrong thing to hand to stereo matching or the local map.
+    // They come from the per-frame pass, which process_frame may already
+    // have made for this frame.
+    ensure_current_descriptors();
+
     // Deterministic order: ascending id.
     std::vector<std::uint64_t> order;
     order.reserve(active_tracks_.size());
     for (const auto& kv : active_tracks_) order.push_back(kv.first);
     std::sort(order.begin(), order.end());
 
-    // Fresh descriptors at CURRENT positions in the LAST PROCESSED frame
-    // (prev_gray_ / pyr_prev_ after process_frame has run). This is what
-    // stock ORB-SLAM3 does every frame; a birth-time or medoid
-    // descriptor at a position the track occupied frames ago is the
-    // wrong thing to hand to stereo matching or the local map.
-    std::vector<cv::KeyPoint> kps;
-    kps.reserve(order.size());
+    // (track id, keypoint) in ascending-id order first.
+    std::vector<std::pair<std::uint64_t, cv::KeyPoint>> picked;
+    picked.reserve(order.size());
     for (std::size_t i = 0; i < order.size(); ++i) {
         const ActiveTrack& t = active_tracks_.at(order[i]);
         // ORB-SLAM3's stereo matcher reads an 11x11 window around the
@@ -1255,26 +1387,32 @@ void HybridFrontend::describe_current(std::vector<std::uint64_t>& ids,
             t.x >= static_cast<float>(prev_gray_.cols) - margin ||
             t.y >= static_cast<float>(prev_gray_.rows) - margin)
             continue;
-        cv::KeyPoint kp(t.x, t.y,
-                        static_cast<float>(cfg_.descriptor_patch_size) * sc);
-        kp.octave = t.octave;
-        kp.class_id = static_cast<int>(i);
-        kps.push_back(kp);
+        const auto it = current_desc_.find(order[i]);
+        if (it == current_desc_.end()) continue;   // dropped by ORB's border filter
+        cv::KeyPoint kp = it->second.kp;
+        kp.class_id = static_cast<int>(i);   // index in ascending-id order
+        picked.emplace_back(order[i], kp);
     }
-    assign_ic_angles(kps, pyr_prev_, cfg_.descriptor_scale_factor, umax_);
-    cv::Mat desc;
-    orb_->compute(prev_gray_, kps, desc);   // drops border keypoints
-    if (desc.empty()) return;
+    if (picked.empty()) return;
 
-    ids.reserve(kps.size());
-    keypoints.reserve(kps.size());
-    for (std::size_t r = 0; r < kps.size(); ++r) {
-        const int src = kps[r].class_id;
-        if (src < 0 || src >= static_cast<int>(order.size())) continue;
-        ids.push_back(order[static_cast<std::size_t>(src)]);
-        keypoints.push_back(kps[r]);
+    // cv::ORB::compute returns its keypoints grouped by octave (stable
+    // within an octave). Keep that row order, so the Frame built from
+    // this is the same as when ORB was called here directly.
+    std::stable_sort(picked.begin(), picked.end(),
+                     [](const std::pair<std::uint64_t, cv::KeyPoint>& a,
+                        const std::pair<std::uint64_t, cv::KeyPoint>& b)
+                     { return a.second.octave < b.second.octave; });
+    ids.reserve(picked.size());
+    keypoints.reserve(picked.size());
+    for (const auto& p : picked) {
+        ids.push_back(p.first);
+        keypoints.push_back(p.second);
     }
-    descriptors = desc.clone();
+
+    descriptors.create(static_cast<int>(ids.size()), 32, CV_8U);
+    for (std::size_t r = 0; r < ids.size(); ++r)
+        std::memcpy(descriptors.ptr<std::uint8_t>(static_cast<int>(r)),
+                    current_desc_.at(ids[r]).desc.data(), 32);
 }
 
 void HybridFrontend::clear_all_map_points() {

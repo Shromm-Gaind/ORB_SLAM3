@@ -1,20 +1,24 @@
 /**
-* This file is part of ORB-SLAM3
-*
-* Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. Gómez Rodríguez, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
-* Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
-*
-* ORB-SLAM3 is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
-* License as published by the Free Software Foundation, either version 3 of the License, or
-* (at your option) any later version.
-*
-* ORB-SLAM3 is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even
-* the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-* GNU General Public License for more details.
-*
-* You should have received a copy of the GNU General Public License along with ORB-SLAM3.
-* If not, see <http://www.gnu.org/licenses/>.
-*/
+ * This file is part of ORB-SLAM3
+ *
+ * Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. Gómez Rodríguez, José M.M. Montiel and Juan D. Tardós,
+ * University of Zaragoza. Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of
+ * Zaragoza.
+ *
+ * Modifications Copyright (C) 2026 Shromm Gaind. Work done as a honours student at Griffith University
+ * Modified 2026: hybrid KLT/Shi-Tomasi front end backend is left untouched.
+ *
+ * ORB-SLAM3 is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+ * License as published by the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * ORB-SLAM3 is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even
+ * the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with ORB-SLAM3.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
 
 
 #include "Tracking.h"
@@ -35,6 +39,7 @@
 
 #include <mutex>
 #include <chrono>
+#include <future>
 
 
 using namespace std;
@@ -1574,6 +1579,30 @@ Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat 
         }
     }
 
+    // HYBRID takeover: the right image is independent of the frontend, so
+    // its extraction starts now and runs while the frontend processes the
+    // left image, instead of starting afterwards inside the Frame
+    // constructor with this thread waiting for it. The result is handed to
+    // the Frame below. Declared before the future so they outlive it; the
+    // future's destructor waits for the task, so nothing is left running
+    // if the frontend throws.
+    std::vector<cv::KeyPoint> vHybridKeysRight;
+    cv::Mat hybridDescriptorsRight;
+    std::future<void> futureRight;
+    const bool bHybridStereoFrame = mbHybridTakeover && mpHybridFrontend &&
+                                    mSensor == System::STEREO && !mpCamera2;
+    if (bHybridStereoFrame)
+    {
+        futureRight = std::async(std::launch::async,
+            [this, &imGrayRight, &vHybridKeysRight, &hybridDescriptorsRight]()
+            {
+                // Same call as Frame::ExtractORB(1, imRight, 0, 0)
+                std::vector<int> vLapping = {0,0};
+                (*mpORBextractorRight)(imGrayRight, cv::Mat(), vHybridKeysRight,
+                                       hybridDescriptorsRight, vLapping);
+            });
+    }
+
     if (mpHybridFrontend) {
         if (mpHybridFrontend->frame_index() == 0 &&
             mpHybridFrontend->active_tracks().empty()) {
@@ -1617,9 +1646,11 @@ Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat 
             cv::Mat desc;
             std::vector<std::uint64_t> vIds;
             HybridFrameInputs(vKeys, desc, vIds);
+            futureRight.get();   // right-image features are ready (rethrows if extraction failed)
             mCurrentFrame = Frame(mImGray, imGrayRight, vKeys, desc, vIds, timestamp,
                                   mpORBextractorLeft, mpORBextractorRight, mpORBVocabulary,
-                                  mK, mDistCoef, mbf, mThDepth, mpCamera);
+                                  mK, mDistCoef, mbf, mThDepth, mpCamera,
+                                  &vHybridKeysRight, &hybridDescriptorsRight);
         }
         else
             mCurrentFrame = Frame(mImGray,imGrayRight,timestamp,mpORBextractorLeft,mpORBextractorRight,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera);

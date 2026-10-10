@@ -1,4 +1,24 @@
 /**
+ * This file is part of ORB-SLAM3
+ *
+ * Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. Gómez Rodríguez, José M.M. Montiel and Juan D. Tardós,
+ * University of Zaragoza. Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of
+ * Zaragoza.
+ *
+ * Modifications Copyright (C) 2026 Shromm Gaind. Work done as a honours student at Griffith University
+ * Modified 2026: hybrid KLT/Shi-Tomasi front end backend is left untouched.
+ *
+ * ORB-SLAM3 is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+ * License as published by the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * ORB-SLAM3 is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even
+ * the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with ORB-SLAM3.
+ * If not, see <http://www.gnu.org/licenses/>.
+ *
  * A Frame constructor that takes the LEFT features from the hybrid
  * frontend instead of running ORBextractor on the left image. Cloned
  * from the stereo constructor in Frame.cc with exactly one substitution:
@@ -35,7 +55,9 @@
               const double &timeStamp,
               ORBextractor* extractorLeft, ORBextractor* extractorRight,
               ORBVocabulary* voc, cv::Mat &K, cv::Mat &distCoef,
-              const float &bf, const float &thDepth, GeometricCamera* pCamera)
+              const float &bf, const float &thDepth, GeometricCamera* pCamera,
+              const std::vector<cv::KeyPoint> *pvKeysRight,
+              const cv::Mat *pDescriptorsRight)
      :mpcpi(NULL), mpORBvocabulary(voc),mpORBextractorLeft(extractorLeft),mpORBextractorRight(extractorRight), mTimeStamp(timeStamp), mK(K.clone()), mK_(Converter::toMatrix3f(K)), mDistCoef(distCoef.clone()), mbf(bf), mThDepth(thDepth),
       mImuCalib(IMU::Calib()), mpImuPreintegrated(NULL), mpPrevFrame(NULL),mpImuPreintegratedFrame(NULL), mpReferenceKF(static_cast<KeyFrame*>(NULL)), mbIsSet(false), mbImuPreintegrated(false),
       mpCamera(pCamera) ,mpCamera2(nullptr), mbHasPose(false), mbHasVelocity(false)
@@ -63,12 +85,29 @@
      // refinement reads mvImagePyramid[kpL.octave]); building it is ~3 ms
      // vs ~60 ms for full extraction, which is the Stage B cost saving.
      // ORBextractor::ComputePyramid must be made public (STAGE_B_EDITS.md).
-     thread threadRight(&Frame::ExtractORB,this,1,imRight,0,0);
-     mpORBextractorLeft->ComputePyramid(imLeft);
-     mvKeys = vHybridKeys;
-     mDescriptors = hybridDescriptors.clone();
-     mvnTrackIds = vHybridTrackIds;
-     threadRight.join();
+     if(pvKeysRight && pDescriptorsRight)
+     {
+         // The caller already ran extractorRight on imRight, concurrently
+         // with the frontend. That call also left the right pyramid in
+         // mpORBextractorRight->mvImagePyramid, where ComputeStereoMatches
+         // reads it. Same extractor, same image: same features as the
+         // ExtractORB call in the other branch.
+         mvKeysRight = *pvKeysRight;
+         mDescriptorsRight = pDescriptorsRight->clone();
+         mpORBextractorLeft->ComputePyramid(imLeft);
+         mvKeys = vHybridKeys;
+         mDescriptors = hybridDescriptors.clone();
+         mvnTrackIds = vHybridTrackIds;
+     }
+     else
+     {
+         thread threadRight(&Frame::ExtractORB,this,1,imRight,0,0);
+         mpORBextractorLeft->ComputePyramid(imLeft);
+         mvKeys = vHybridKeys;
+         mDescriptors = hybridDescriptors.clone();
+         mvnTrackIds = vHybridTrackIds;
+         threadRight.join();
+     }
      // -------------------------------------------------------------------
  #ifdef REGISTER_TIMES
      std::chrono::steady_clock::time_point time_EndExtORB = std::chrono::steady_clock::now();

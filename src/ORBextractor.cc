@@ -1,20 +1,24 @@
 /**
-* This file is part of ORB-SLAM3
-*
-* Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. Gómez Rodríguez, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
-* Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
-*
-* ORB-SLAM3 is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
-* License as published by the Free Software Foundation, either version 3 of the License, or
-* (at your option) any later version.
-*
-* ORB-SLAM3 is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even
-* the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-* GNU General Public License for more details.
-*
-* You should have received a copy of the GNU General Public License along with ORB-SLAM3.
-* If not, see <http://www.gnu.org/licenses/>.
-*/
+ * This file is part of ORB-SLAM3
+ *
+ * Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. Gómez Rodríguez, José M.M. Montiel and Juan D. Tardós,
+ * University of Zaragoza. Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of
+ * Zaragoza.
+ *
+ * Modifications Copyright (C) 2026 Shromm Gaind. Work done as a honours student at Griffith University
+ * Modified 2026: hybrid KLT/Shi-Tomasi front end backend is left untouched.
+ *
+ * ORB-SLAM3 is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+ * License as published by the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * ORB-SLAM3 is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even
+ * the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with ORB-SLAM3.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
 
 /**
 * Software License Agreement (BSD License)
@@ -53,6 +57,7 @@
 
 
 #include <opencv2/core/core.hpp>
+#include <opencv2/core/utility.hpp>   // cv::parallel_for_
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/features2d/features2d.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
@@ -979,7 +984,11 @@ namespace ORB_SLAM3
     {
         allKeypoints.resize(nlevels);
 
-        for (int level = 0; level < nlevels; ++level)
+        // The pyramid levels are independent: each one reads its own
+        // level image and writes only allKeypoints[level]. They are
+        // processed in parallel; the result does not depend on the
+        // number of threads.
+        auto processLevel = [&](const int level)
         {
             // Identical detection ROI to the FAST path.
             const int minBorderX = EDGE_THRESHOLD-3;
@@ -990,7 +999,7 @@ namespace ORB_SLAM3
             const int roiW = maxBorderX - minBorderX;
             const int roiH = maxBorderY - minBorderY;
             if (roiW < 2*ST_NMS_RADIUS+1 || roiH < 2*ST_NMS_RADIUS+1)
-                continue;
+                return;
 
             // lambda2 at every pixel of the level image. This IS the
             // Shi-Tomasi "Good Features to Track" response. Note that
@@ -1078,7 +1087,13 @@ namespace ORB_SLAM3
                 keypoints[i].octave=level;
                 keypoints[i].size = scaledPatchSize;
             }
-        }
+        };
+
+        cv::parallel_for_(cv::Range(0, nlevels), [&](const cv::Range& range)
+        {
+            for (int level = range.start; level < range.end; ++level)
+                processLevel(level);
+        }, static_cast<double>(nlevels));
 
         // Orientation via intensity centroid — unchanged (§4.5.4).
         // Steered BRIEF downstream is untouched (§3.2), so descriptors
