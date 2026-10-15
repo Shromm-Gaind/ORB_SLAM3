@@ -1,24 +1,20 @@
 /**
- * This file is part of ORB-SLAM3
- *
- * Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. Gómez Rodríguez, José M.M. Montiel and Juan D. Tardós,
- * University of Zaragoza. Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of
- * Zaragoza.
- *
- * Modifications Copyright (C) 2026 Shromm Gaind. Work done as a honours student at Griffith University
- * Modified 2026: hybrid KLT/Shi-Tomasi front end backend is left untouched.
- *
- * ORB-SLAM3 is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
- * License as published by the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * ORB-SLAM3 is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even
- * the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along with ORB-SLAM3.
- * If not, see <http://www.gnu.org/licenses/>.
- */
+* This file is part of ORB-SLAM3
+*
+* Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. Gómez Rodríguez, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
+* Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
+*
+* ORB-SLAM3 is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+* License as published by the Free Software Foundation, either version 3 of the License, or
+* (at your option) any later version.
+*
+* ORB-SLAM3 is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even
+* the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+* GNU General Public License for more details.
+*
+* You should have received a copy of the GNU General Public License along with ORB-SLAM3.
+* If not, see <http://www.gnu.org/licenses/>.
+*/
 
 
 #include "Tracking.h"
@@ -107,6 +103,7 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
         hcfg.klt_pyramid_levels     = settings->hybridKltLevels();
         hcfg.klt_window             = cv::Size(settings->hybridKltWindow(),
                                                settings->hybridKltWindow());
+        hcfg.klt_min_eig_threshold  = settings->hybridKltMinEig();
         hcfg.fb_threshold_px        = settings->hybridFbThresh();
         hcfg.ransac_reproj_px       = settings->hybridRansacPx();
         hcfg.occupancy_mask_radius  = settings->hybridMaskRadius();
@@ -137,7 +134,8 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
                       << hcfg.dormant_horizon_frames << ", r_reid="
                       << hcfg.reid_radius_px << ", theta="
                       << hcfg.reid_hamming_threshold << "+"
-                      << hcfg.reid_hamming_slope_per_frame << "/f)"
+                      << hcfg.reid_hamming_slope_per_frame << "/f, kltMinEig="
+                      << hcfg.klt_min_eig_threshold << ")"
                       << std::endl;
         hcfg.tlm_radius_px              = settings->hybridTlmRadius();
         hcfg.tlm_hamming_threshold      = settings->hybridTlmHamming();
@@ -1631,6 +1629,25 @@ Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat 
                           << " oct=";
                 for (std::size_t o = 0; o < hr.octave_histogram.size(); ++o)
                     std::cout << (o ? "," : "") << hr.octave_histogram[o];
+                // Why tracks failed the KLT status test (in - klt). New
+                // fields go after oct= so the earlier ones keep their place.
+                //   mineig=F+B  failed the min-eigenvalue test forward + backward
+                //   left=       moved out of the image
+                //   eigdec=a/b/c  of the mineig failures: min eigenvalue within
+                //                 10x of the threshold / within 100x / lower
+                //   inoct= / deadoct=  per octave: tracks entering / mineig failures
+                std::cout << " mineig=" << hr.klt_fail_texture_fwd << "+"
+                          << hr.klt_fail_texture_bwd
+                          << " left=" << hr.klt_fail_left_image
+                          << " eigdec=" << hr.klt_fail_texture_decades[0] << "/"
+                          << hr.klt_fail_texture_decades[1] << "/"
+                          << hr.klt_fail_texture_decades[2]
+                          << " inoct=";
+                for (std::size_t o = 0; o < hr.octave_tracks_in.size(); ++o)
+                    std::cout << (o ? "," : "") << hr.octave_tracks_in[o];
+                std::cout << " deadoct=";
+                for (std::size_t o = 0; o < hr.octave_fail_texture.size(); ++o)
+                    std::cout << (o ? "," : "") << hr.octave_fail_texture[o];
                 std::cout << std::endl;
             }
         }

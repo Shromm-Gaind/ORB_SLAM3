@@ -19,6 +19,7 @@
  * You should have received a copy of the GNU General Public License along with ORB-SLAM3.
  * If not, see <http://www.gnu.org/licenses/>.
  */
+
 #ifndef ORB_SLAM3_SETTINGS_H
 #define ORB_SLAM3_SETTINGS_H
 
@@ -120,6 +121,7 @@ namespace ORB_SLAM3 {
         float hybridRansacPx()   const { return hybridRansacPx_; }
         int   hybridKltLevels()  const { return hybridKltLevels_; }
         int   hybridKltWindow()  const { return hybridKltWindow_; }
+        float hybridKltMinEig()  const { return hybridKltMinEig_; }
         float hybridLocalScale() const { return hybridLocalScale_; }
         bool  hybridEnableReid() const { return hybridEnableReid_; }
         bool  hybridUseRepDesc() const { return hybridUseRepDesc_; }
@@ -252,6 +254,7 @@ namespace ORB_SLAM3 {
         float hybridRansacPx_    = 3.0f;
         int   hybridKltLevels_   = 3;
         int   hybridKltWindow_   = 21;
+        float hybridKltMinEig_   = 1.0e-4f;
         float hybridLocalScale_  = 0.3f;
         bool  hybridEnableReid_  = true;
         bool  hybridUseRepDesc_  = true;

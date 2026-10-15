@@ -518,6 +518,9 @@ namespace ORB_SLAM3 {
         if(!found) hybridKltLevels_ = 3;
         hybridKltWindow_  = readParameter<int>  (fSettings, "Hybrid.kltWindow",      found, false);
         if(!found) hybridKltWindow_ = 21;
+        // KLT minEigThreshold. Must be written as a real number (1.0e-4, not 0).
+        hybridKltMinEig_  = readParameter<float>(fSettings, "Hybrid.kltMinEig",      found, false);
+        if(!found) hybridKltMinEig_ = 1.0e-4f;
         hybridLocalScale_ = readParameter<float>(fSettings, "Hybrid.localQualityScale", found, false);
         if(!found) hybridLocalScale_ = 0.3f;
         hybridEnableReid_ = readParameter<int>(fSettings, "Hybrid.enableReid", found, false) != 0;

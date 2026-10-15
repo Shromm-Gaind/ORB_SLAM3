@@ -19,7 +19,6 @@
  * You should have received a copy of the GNU General Public License along with ORB-SLAM3.
  * If not, see <http://www.gnu.org/licenses/>.
  */
-
 #include "HybridFrontend.h"
 
 #include <algorithm>
@@ -828,19 +827,112 @@ FrameResult HybridFrontend::process_frame(const cv::Mat& curr_gray) {
         }
         std::vector<cv::Point2f> curr_pts, back_pts;
         std::vector<std::uint8_t> st_fwd, st_bwd;
-        std::vector<float> err;
+        // With OPTFLOW_LK_GET_MIN_EIGENVALS the "error" output is each
+        // point's min eigenvalue at full resolution: the number KLT
+        // compares with cfg.klt_min_eig_threshold. The flag does not
+        // change the tracked positions.
+        std::vector<float> eig_fwd, eig_bwd;
         const cv::TermCriteria crit(
             cv::TermCriteria::EPS | cv::TermCriteria::COUNT,
             cfg.klt_max_iter, cfg.klt_eps);
+        const int klt_flags = cv::OPTFLOW_LK_GET_MIN_EIGENVALS;
         cv::calcOpticalFlowPyrLK(prev_gray_, curr_gray, prev_pts, curr_pts,
-                st_fwd, err, cfg.klt_window,
-                cfg.klt_pyramid_levels, crit,
-                0, 1e-6);   // flags, minEigThreshold
+                                 st_fwd, eig_fwd, cfg.klt_window,
+                                 cfg.klt_pyramid_levels, crit, klt_flags,
+                                 cfg.klt_min_eig_threshold);
         cv::calcOpticalFlowPyrLK(curr_gray, prev_gray_, curr_pts, back_pts,
-                st_bwd, err, cfg.klt_window,
-                cfg.klt_pyramid_levels, crit,
-                0, 1e-6);
+                                 st_bwd, eig_bwd, cfg.klt_window,
+                                 cfg.klt_pyramid_levels, crit, klt_flags,
+                                 cfg.klt_min_eig_threshold);
+
         const std::size_t n = ids.size();
+
+        // True when a point is outside the area KLT can place a window
+        // in (more than a window outside the image). Without the flag
+        // above, OpenCV clears the status of a point that ENDS there
+        // while measuring its patch error; with the flag it skips that
+        // step. The rule is applied here so the status is the same as
+        // before the flag was added.
+        const cv::Point2f half_win(
+            static_cast<float>(cfg.klt_window.width - 1) * 0.5f,
+            static_cast<float>(cfg.klt_window.height - 1) * 0.5f);
+        auto outside_search_area = [&](const cv::Point2f& p,
+                                       const cv::Size& img) {
+            const int ix = cvFloor(p.x - half_win.x);
+            const int iy = cvFloor(p.y - half_win.y);
+            return ix < -cfg.klt_window.width || ix >= img.width ||
+                   iy < -cfg.klt_window.height || iy >= img.height;
+        };
+        // Diagnostics only: why each track that failed the status test
+        // failed it. Nothing below reads these.
+        {
+            const std::size_t nlev = static_cast<std::size_t>(
+                std::max(1, cfg.descriptor_levels));
+            res.octave_tracks_in.assign(nlev, 0);
+            res.octave_fail_texture.assign(nlev, 0);
+            const float T = static_cast<float>(cfg.klt_min_eig_threshold);
+            for (std::size_t i = 0; i < n; ++i) {
+                const int oct = active_tracks_.at(ids[i]).octave;
+                const bool oct_ok =
+                    oct >= 0 && static_cast<std::size_t>(oct) < nlev;
+                if (oct_ok)
+                    ++res.octave_tracks_in[static_cast<std::size_t>(oct)];
+
+                const bool fwd_left = outside_search_area(
+                    curr_pts[i], curr_gray.size());
+                const bool fwd_ok = st_fwd[i] == 1 && !fwd_left;
+                const bool bwd_left = outside_search_area(
+                    back_pts[i], prev_gray_.size());
+                const bool bwd_ok = st_bwd[i] == 1 && !bwd_left;
+                if (fwd_ok && bwd_ok) continue;   // passed the status test
+
+                float eig = 0.0f;
+                bool texture = false;
+                if (!fwd_ok) {
+                    // The start point is always inside the image, so a
+                    // forward failure that did not run off the image is
+                    // the eigenvalue test.
+                    if (fwd_left) {
+                        ++res.klt_fail_left_image;
+                    } else {
+                        ++res.klt_fail_texture_fwd;
+                        texture = true;
+                        eig = eig_fwd[i];
+                    }
+                } else {
+                    // The backward pass starts at the forward result,
+                    // which can itself be off the image.
+                    const bool start_off =
+                        curr_pts[i].x < 0.0f || curr_pts[i].y < 0.0f ||
+                        curr_pts[i].x >= static_cast<float>(curr_gray.cols) ||
+                        curr_pts[i].y >= static_cast<float>(curr_gray.rows);
+                    if (start_off || bwd_left) {
+                        ++res.klt_fail_left_image;
+                    } else {
+                        ++res.klt_fail_texture_bwd;
+                        texture = true;
+                        eig = eig_bwd[i];
+                    }
+                }
+                if (texture) {
+                    if (oct_ok)
+                        ++res.octave_fail_texture[
+                            static_cast<std::size_t>(oct)];
+                    const int bin = (eig >= 0.1f * T) ? 0
+                                  : (eig >= 0.01f * T) ? 1 : 2;
+                    ++res.klt_fail_texture_decades[bin];
+                }
+            }
+        }
+        for (std::size_t i = 0; i < n; ++i) {
+            if (st_fwd[i] == 1 &&
+                outside_search_area(curr_pts[i], curr_gray.size()))
+                st_fwd[i] = 0;
+            if (st_bwd[i] == 1 &&
+                outside_search_area(back_pts[i], prev_gray_.size()))
+                st_bwd[i] = 0;
+        }
+
         std::vector<bool> surv(n, false);
         int n_klt = 0, n_fb = 0;
         for (std::size_t i = 0; i < n; ++i) {

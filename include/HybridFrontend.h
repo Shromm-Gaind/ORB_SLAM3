@@ -51,6 +51,17 @@ struct HybridConfig {
     int klt_pyramid_levels = 3;
     int klt_max_iter = 30;
     double klt_eps = 0.01;
+    // cv::calcOpticalFlowPyrLK's minEigThreshold. KLT declares a track
+    // lost when the smaller eigenvalue of its window's gradient matrix
+    // at full resolution, divided by the window area, is below this.
+    // In OpenCV's scaling that value is roughly
+    //     (mean squared gradient along the weakest direction) / 1024
+    // with the gradient in grey levels (0-255) per pixel, so the
+    // default 1e-4 rejects windows whose RMS gradient in the weakest
+    // direction is under ~0.33 grey levels per pixel.
+    // 1e-4 is OpenCV's default and what this frontend used before the
+    // value became configurable.
+    double klt_min_eig_threshold = 1e-4;
 
     // Step 2 — forward-backward consistency
     float fb_threshold_px = 1.0f;
@@ -174,6 +185,23 @@ struct FrameResult {
     int tracks_after_klt = 0;
     int tracks_after_fb = 0;
     int tracks_after_ransac = 0;
+    // ---- why tracks failed the KLT status test (tracks_in - tracks_after_klt)
+    // "texture": the min-eigenvalue test above (cfg.klt_min_eig_threshold).
+    //   fwd = failed on the previous image at the track's old position,
+    //   bwd = passed forward, then failed on the current image at its new position.
+    // "left image": the point moved out of the image during tracking.
+    // The three counts sum to tracks_in - tracks_after_klt.
+    int klt_fail_texture_fwd = 0;
+    int klt_fail_texture_bwd = 0;
+    int klt_fail_left_image = 0;
+    // Texture failures by how far below the threshold T their min
+    // eigenvalue was: [0] in [T/10, T), [1] in [T/100, T/10), [2] below
+    // T/100. Shows how many would have passed a 10x or 100x lower T.
+    int klt_fail_texture_decades[3] = {0, 0, 0};
+    // Per octave (size = descriptor_levels): tracks entering this frame,
+    // and how many of them failed the texture test.
+    std::vector<int> octave_tracks_in;
+    std::vector<int> octave_fail_texture;
     int new_corners_detected = 0;
     int reids_attempted = 0;
     int reids_succeeded = 0;
