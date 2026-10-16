@@ -16,6 +16,18 @@ runs stock ORB-SLAM3.
 
 https://drive.google.com/file/d/1I3L1O4M5zX-BSWuV8do-dNWiqUMOxStK/view?usp=sharing
 
+Uncompress using 
+
+```bash
+tar -xf Dataset_Thesis.tar.gz
+```
+
+Datasets are saved as ros bags, use foxglove or
+
+```bash
+ros2 run rqt_image_view rqt_image_view
+```
+
 ## What is modified
 
 **Detector.** Multi-octave Shi–Tomasi detection with rank selection replaces
