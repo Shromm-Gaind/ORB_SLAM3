@@ -1,20 +1,25 @@
 /**
- * Drop-in alternative to ORBmatcher::SearchByBoW(KeyFrame*, KeyFrame*, ...)
- * for loop-closure / merge verification. Identical contract and identical
- * acceptance logic — only map-pointed keypoints on both sides, TH_LOW,
- * nearest-neighbour ratio, one-to-one assignment, rotation-histogram
- * check — with ONE difference: every keypoint of KF1 is compared against
- * every valid keypoint of KF2, instead of only those sharing a vocabulary
- * node (mFeatVec). If loop closure converges with this and not with
- * SearchByBoW, the offline vocabulary's node grouping was splitting true
- * correspondences apart (OV2SLAM verifies candidates the same way).
+ * This file is part of ORB-SLAM3
  *
- * Cost: |valid KF1| x |valid KF2| Hamming distances, ~1M for two 1000-point
- * keyframes, roughly 10-20 ms with the scalar DescriptorDistance. It runs
- * on the asynchronous loop-closing thread. If that thread falls behind,
- * cv::BFMatcher(NORM_HAMMING) with knnMatch(k=2) is the SIMD alternative.
+ * Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. Gómez Rodríguez, José M.M. Montiel and Juan D. Tardós,
+ * University of Zaragoza. Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of
+ * Zaragoza.
  *
+ * Modifications Copyright (C) 2026 Shromm Gaind. Work done as a honours student at Griffith University
+ * Modified 2026: hybrid KLT/Shi-Tomasi front end backend is left untouched.
+ *
+ * ORB-SLAM3 is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+ * License as published by the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * ORB-SLAM3 is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even
+ * the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with ORB-SLAM3.
+ * If not, see <http://www.gnu.org/licenses/>.
  */
+
 
  #include "ORBmatcher.h"
  #include "KeyFrame.h"

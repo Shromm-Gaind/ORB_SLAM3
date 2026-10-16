@@ -57,13 +57,13 @@
 
 
 #include <opencv2/core/core.hpp>
-#include <opencv2/core/utility.hpp>   // cv::parallel_for_
+#include <opencv2/core/utility.hpp> 
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/features2d/features2d.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 #include <vector>
 #include <iostream>
-#include <algorithm>   // HYBRID FRONTEND: std::nth_element / std::max
+#include <algorithm>   
 
 #include "ORBextractor.h"
 #include "Verbose.h"
